@@ -1,0 +1,2 @@
+mmsi,imo,callsign,shipname,ship_type,to_bow,to_stern,to_port,to_starboard,draught,record_count,static_record_count,filled_static_fields
+100,IMO1,CALL,TEST 01,Cargo,10,20,3,4,3.2,2,1,9

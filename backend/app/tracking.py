@@ -138,6 +138,14 @@ class InstanceAggregator:
         draft = fuse_draft(instance.drafts)
         return {"current_name": name["recognized_zh"], "current_name_share": name["share"], "current_draft_depth_m": draft["draft_depth_m"], "current_status": AttributeStatus.CONFIRMED if name["status"] is AttributeStatus.CONFIRMED and draft["status"] is AttributeStatus.CONFIRMED else AttributeStatus.PENDING_REVIEW}
 
+    def snapshot(self, track_id: int, observed_at: datetime) -> InstanceResultV2:
+        """Return the current aggregate without closing the active vessel instance."""
+        instance = self.instances[track_id]
+        name = fuse_name(instance.names)
+        draft = fuse_draft(instance.drafts)
+        status = AttributeStatus.CONFIRMED if name["status"] is AttributeStatus.CONFIRMED and draft["status"] is AttributeStatus.CONFIRMED else AttributeStatus.PENDING_REVIEW
+        return InstanceResultV2(task_id=self.task_id, source_filename=self.source_filename, instance_id=track_id, start_time=instance.started_at, end_time=observed_at, recognized_zh=name["recognized_zh"], recognized_en=name["recognized_en"], draft_depth_m=draft["draft_depth_m"], status=status, name_candidates=name["candidates"], draft_statistics=draft["statistics"])
+
     def finish(self, track_id: int, observed_at: datetime) -> InstanceResultV2:
         if track_id in self._finished:
             raise ValueError(f"instance {track_id} already finished")
@@ -146,10 +154,7 @@ class InstanceAggregator:
             assert_transition(instance.state, InstanceState.FINISHED, ALLOWED_INSTANCE_TRANSITIONS)
             instance.state = InstanceState.FINISHED
         self._finished.add(track_id)
-        name = fuse_name(instance.names)
-        draft = fuse_draft(instance.drafts)
-        status = AttributeStatus.CONFIRMED if name["status"] is AttributeStatus.CONFIRMED and draft["status"] is AttributeStatus.CONFIRMED else AttributeStatus.PENDING_REVIEW
-        return InstanceResultV2(task_id=self.task_id, source_filename=self.source_filename, instance_id=track_id, start_time=instance.started_at, end_time=observed_at, recognized_zh=name["recognized_zh"], recognized_en=name["recognized_en"], draft_depth_m=draft["draft_depth_m"], status=status, name_candidates=name["candidates"], draft_statistics=draft["statistics"])
+        return self.snapshot(track_id, observed_at)
 
     def finish_all(self, observed_at: datetime) -> list[InstanceResultV2]:
         return [self.finish(track_id, observed_at) for track_id in self.instances if track_id not in self._finished]

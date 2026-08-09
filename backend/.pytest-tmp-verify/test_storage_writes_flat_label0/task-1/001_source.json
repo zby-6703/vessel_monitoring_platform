@@ -1,0 +1,118 @@
+{
+  "version": "2.0",
+  "flags": {},
+  "imagePath": "船.jpg",
+  "imageData": null,
+  "imageWidth": 20,
+  "imageHeight": 10,
+  "shapes": [
+    {
+      "label": "ship",
+      "shape_type": "rectangle",
+      "points": [
+        [
+          1.0,
+          1.0
+        ],
+        [
+          10.0,
+          8.0
+        ]
+      ],
+      "confidence": 0.9
+    },
+    {
+      "label": "water",
+      "shape_type": "polygon",
+      "points": [
+        [
+          1.0,
+          1.0
+        ],
+        [
+          2.0,
+          1.0
+        ],
+        [
+          2.0,
+          2.0
+        ]
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "results": [
+    {
+      "recognized_zh": "贵港海泰52",
+      "recognized_en": "UNKNOWN",
+      "draft_depth_m": 2.3,
+      "draft_success": true,
+      "draft_method": null,
+      "errors": []
+    }
+  ],
+  "frame": {
+    "type": "frame",
+    "schema_version": "2.0",
+    "task_id": "task-1",
+    "source_filename": "船.jpg",
+    "sample_id": "船.jpg",
+    "frame_index": null,
+    "source_frame_index": null,
+    "observed_at": "2026-08-09T15:53:22.679212Z",
+    "image_width": 20,
+    "image_height": 10,
+    "processing_ms": 1.0,
+    "vessels": [
+      {
+        "vessel_id": 1,
+        "track_id": null,
+        "ship": {
+          "label": "ship",
+          "xyxy": [
+            1.0,
+            1.0,
+            10.0,
+            8.0
+          ],
+          "confidence": 0.9,
+          "class_name": null
+        },
+        "regions": [],
+        "draft_marks": [],
+        "water": [
+          {
+            "label": "water",
+            "points": [
+              [
+                1.0,
+                1.0
+              ],
+              [
+                2.0,
+                1.0
+              ],
+              [
+                2.0,
+                2.0
+              ]
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "recognized_zh": "贵港海泰52",
+        "recognized_en": "UNKNOWN",
+        "name_observation": null,
+        "draft": {
+          "depth_m": 2.3,
+          "success": true,
+          "roi_confidence": 0.0,
+          "character_confidence": 0.0,
+          "method": null
+        },
+        "errors": []
+      }
+    ],
+    "errors": []
+  }
+}

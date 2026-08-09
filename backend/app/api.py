@@ -5,8 +5,9 @@ import asyncio
 import base64
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -20,7 +21,7 @@ from .inference.model_registry import ModelRegistry
 from .pipeline import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, Pipeline
 from .schemas import InstanceResultV2, TaskKind
 from .database import ResultRepository, SessionLocal, engine
-from .models import ShipArchive, VideoResult
+from .models import RealtimeTrackingResult, RealtimeVideoResult
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
 
@@ -66,19 +67,49 @@ def health():
 
 @router.get("/api/dashboard", tags=["system"])
 def dashboard():
+    """Live-monitoring statistics are based on tracked instances, not the ship archive."""
+    local_timezone = ZoneInfo("Asia/Shanghai")
     now = datetime.now(timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_now = now.astimezone(local_timezone)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     with SessionLocal() as db:
-        rows = list(db.query(VideoResult).filter(VideoResult.end_time >= day_start).order_by(VideoResult.end_time.desc()).all())
-        mmsi = {row.ais_mmsi for row in rows if row.ais_mmsi}
-        archives = {row.mmsi: row for row in db.query(ShipArchive).filter(ShipArchive.mmsi.in_(mmsi)).all()} if mmsi else {}
+        rows = list(db.query(RealtimeTrackingResult).filter(RealtimeTrackingResult.start_time >= day_start).order_by(RealtimeTrackingResult.start_time.desc()).all())
+
     drafts = [row.draft_depth_m for row in rows if row.draft_depth_m is not None]
-    hourly: dict[str, list[VideoResult]] = {}
+    hourly: dict[datetime, list[RealtimeTrackingResult]] = {}
     for row in rows:
-        hour = row.end_time.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+        recorded_at = row.start_time if row.start_time.tzinfo else row.start_time.replace(tzinfo=timezone.utc)
+        hour = recorded_at.astimezone(local_timezone).replace(minute=0, second=0, microsecond=0)
         hourly.setdefault(hour, []).append(row)
-    trend = [{"time": hour, "traffic": len(items), "average_draft": round(sum(values) / len(values), 4) if (values := [item.draft_depth_m for item in items if item.draft_depth_m is not None]) else None} for hour, items in sorted(hourly.items())]
-    return {"statistics": {"generated_at": now.isoformat(), "today_traffic": len(rows), "overload_alerts": 0, "average_draft": round(sum(drafts) / len(drafts), 4) if drafts else None, "average_displacement": None, "hourly": trend}, "records": [{"id": row.id, "captured_at": row.end_time.isoformat(), "track_id": row.instance_id, "camera_id": "local-video", "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "review_status": row.status} for row in rows[:12]]}
+    trend = []
+    for offset in range(23, -1, -1):
+        hour = local_now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=offset)
+        items = hourly.get(hour, [])
+        values = [item.draft_depth_m for item in items if item.draft_depth_m is not None]
+        trend.append({"time": hour.isoformat(), "traffic": len(items), "average_draft": round(sum(values) / len(values), 4) if values else None})
+    displacements = [row.displacement for row in rows if row.displacement is not None]
+    overload_alerts = sum(row.draft_depth_m > 4.6 for row in rows if row.draft_depth_m is not None)
+    return {"statistics": {"generated_at": now.isoformat(), "today_traffic": len(rows), "overload_alerts": overload_alerts, "average_draft": round(sum(drafts) / len(drafts), 4) if drafts else None, "average_displacement": round(sum(displacements) / len(displacements), 2) if displacements else None, "hourly": trend}, "records": [{"id": row.id, "captured_at": row.start_time.isoformat(), "track_id": row.instance_id, "camera_id": row.camera_id or "realtime", "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "displacement_tons": row.displacement, "review_status": row.status} for row in rows[:12]]}
+
+
+@router.get("/api/realtime/results", tags=["realtime"])
+def realtime_results(limit: int = 50):
+    """Return persisted live frame and instance results for dashboard recovery/refresh."""
+    limit = max(1, min(limit, 500))
+    with SessionLocal() as db:
+        frames = list(db.query(RealtimeVideoResult).order_by(RealtimeVideoResult.observed_at.desc()).limit(limit).all())
+        instances = list(db.query(RealtimeTrackingResult).order_by(RealtimeTrackingResult.end_time.desc()).limit(limit).all())
+    frame_items = []
+    for row in frames:
+        vessels = (row.payload_json or {}).get("vessels") or []
+        first = vessels[0] if vessels else {}
+        draft = first.get("draft") or {}
+        ship = first.get("ship") or {}
+        frame_items.append({"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": first.get("track_id") or first.get("vessel_id"), "frame_index": row.frame_index, "captured_at": row.observed_at.isoformat(), "ship_name": first.get("recognized_zh", "UNKNOWN"), "mmsi": None, "draft_depth": draft.get("depth_m"), "status": "pending_review", "confidence": ship.get("confidence"), "vessel_count": row.vessel_count})
+    return {
+        "frames": frame_items,
+        "instances": [{"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": row.instance_id, "captured_at": row.end_time.isoformat(), "start_time": row.start_time.isoformat(), "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "status": row.status} for row in instances],
+    }
 
 
 def _job(task_id: str) -> dict:
@@ -214,6 +245,8 @@ class _LocalPlayback:
         storage = None
         aggregator = None
         result_uri = None
+        session_id = None
+        camera_id = None
         try:
             settings = get_settings()
             if self.models is None:
@@ -250,9 +283,13 @@ class _LocalPlayback:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
+                repository.save_realtime_frame(result, str(session_id), "local_video", path.name, str(camera_id), result_uri)
+                for track_id in active_ids:
+                    repository.save_realtime_instance(aggregator.snapshot(track_id, result.observed_at), str(session_id), "local_video", str(camera_id), result_uri)
                 for instance in aggregator.sweep(active_ids, result.observed_at):
                     storage.append_video_record(stem, instance)
                     repository.save_video_instance(instance, result_uri)
+                    repository.save_realtime_instance(instance, str(session_id), "local_video", str(camera_id), result_uri)
                 encoded_ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
                 if encoded_ok:
                     payload = {"type": "local_playback_frame", "data": {"session_id": session_id, "frame_id": processed, "camera_id": camera_id, "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"), "frame": _live_frame(result, str(camera_id), current)}}
@@ -273,6 +310,7 @@ class _LocalPlayback:
                 for instance in aggregator.finish_all(datetime.now(timezone.utc)):
                     storage.append_video_record(stem, instance)
                     repository.save_video_instance(instance, result_uri)
+                    repository.save_realtime_instance(instance, str(session_id), "local_video", str(camera_id), result_uri)
             try:
                 asyncio.run_coroutine_threadsafe(hub.broadcast({"type": "local_playback_status", "data": self.snapshot()}), loop).result(timeout=5)
             except Exception:
@@ -318,6 +356,7 @@ async def publish_instance_event(event: dict):
             if not result_uri:
                 raise ValueError("result_uri is required when final_instance is supplied")
             ResultRepository(SessionLocal).save_video_instance(instance, result_uri)
+            ResultRepository(SessionLocal).save_realtime_instance(instance, instance.task_id, "realtime_stream", event.get("camera_id"), result_uri)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     await hub.broadcast({"type": "instance_update", "data": event})

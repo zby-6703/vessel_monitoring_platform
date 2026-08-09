@@ -113,6 +113,8 @@ img { display: block; max-width: 100%; }
 .monitor-loading strong { font-size: 14px; }
 .monitor-loading span { color: var(--text-muted); font-size: 12px; }
 .local-video-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-height: 36px; padding: 0 14px 10px; }
+.frame-step-setting { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.frame-step-setting .el-input-number { width: 92px; }
 .video-vignette { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to bottom, rgb(0 0 0 / 25%), transparent 22%, transparent 70%, rgb(0 0 0 / 58%)); }
 .detection-box { position: absolute; z-index: 3; pointer-events: none; border: 1px solid var(--primary-hover); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 25%); transition: left 150ms linear; }
 .detection-box::before, .detection-box::after { content: ''; position: absolute; width: 16px; height: 16px; border-color: #8ce5eb; }

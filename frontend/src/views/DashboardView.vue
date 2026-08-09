@@ -2,7 +2,7 @@
 import { AlertTriangle, Anchor, FileSearch, RadioTower, ServerCog, Ship, Square, Upload, Waves } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getDashboard, getHealth, getLocalPlayback, getStreams, startLocalPlayback, stopLocalPlayback, type Health, type LocalPlaybackStatus, type RecordItem, type Statistics, type StreamItem } from '../api'
+import { getDashboard, getHealth, getLocalPlayback, getRealtimeResults, getStreams, startLocalPlayback, stopLocalPlayback, type Health, type LocalPlaybackStatus, type RecordItem, type Statistics, type StreamItem } from '../api'
 import MetricTile from '../components/MetricTile.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
@@ -28,10 +28,12 @@ const localPlayback = ref<LocalPlaybackStatus | null>(null)
 const localFrame = ref<string | null>(null)
 const videoInput = ref<HTMLInputElement>()
 const localUploadProgress = ref(0)
+const liveFrameStep = ref(3)
 const loading = ref(true)
 let socket: WebSocket | null = null
 let reconnectTimer: number | undefined
 let refreshTimer: number | undefined
+let statisticsRefreshTimer: number | undefined
 
 const latestVessel = computed(() => liveFrame.value?.vessels?.[0] || null)
 const visibleRows = computed(() => liveRows.value.length ? liveRows.value : records.value)
@@ -51,15 +53,36 @@ const formatTime = (value: string) => new Date(value).toLocaleTimeString('zh-CN'
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    const [healthValue, streams, playback, dashboard] = await Promise.all([getHealth(), getStreams(), getLocalPlayback(), getDashboard()])
+    const [healthValue, streams, playback, dashboard, realtime] = await Promise.all([getHealth(), getStreams(), getLocalPlayback(), getDashboard(), getRealtimeResults()])
     statistics.value = dashboard.statistics
     records.value = dashboard.records
     health.value = healthValue
     stream.value = streams[0] || null
     localPlayback.value = playback
+    if (!liveRows.value.length || !localActive.value) {
+      const persisted = [...realtime.frames, ...realtime.instances].sort((a, b) => +new Date(b.captured_at) - +new Date(a.captured_at)).slice(0, 12)
+      liveRows.value = persisted.map((row) => ({
+        id: row.id, captured_at: row.captured_at, track_id: row.track_id || 0, camera_id: row.camera_id || row.source_name || 'realtime',
+        ship_name: row.ship_name || 'UNKNOWN', mmsi: row.mmsi, draft_depth: row.draft_depth,
+        displacement_tons: null, load_ratio: null, risk_level: row.status === 'confirmed' ? 'normal' : 'unknown', confidence: row.confidence || null,
+        full_image_path: null, ship_name_image_path: null, water_mask_path: null, draft_image_path: null, review_status: 'pending',
+      }))
+    }
   } catch {
     if (!silent) ElMessage.error('真实监测数据加载失败，请检查后端服务')
   } finally { loading.value = false }
+}
+
+function scheduleRealtimeStatisticsRefresh() {
+  if (statisticsRefreshTimer) return
+  statisticsRefreshTimer = window.setTimeout(async () => {
+    statisticsRefreshTimer = undefined
+    try {
+      const dashboard = await getDashboard()
+      statistics.value = dashboard.statistics
+      records.value = dashboard.records
+    } catch { /* Keep the last valid realtime statistics until the next refresh. */ }
+  }, 1000)
 }
 
 function connect() {
@@ -92,6 +115,7 @@ function connect() {
       })
     }
     liveRows.value = liveRows.value.slice(0, 12)
+    scheduleRealtimeStatisticsRefresh()
   }
 }
 async function chooseLocalVideo(event: Event) {
@@ -99,7 +123,7 @@ async function chooseLocalVideo(event: Event) {
   if (!file) return
   const form = new FormData()
   form.append('file', file)
-  form.append('frame_step', '3')
+  form.append('frame_step', String(liveFrameStep.value))
   form.append('camera_id', 'local-video')
   localFrame.value = null
   localUploadProgress.value = 0
@@ -119,7 +143,7 @@ async function stopLocalVideo() {
   } catch { ElMessage.error('停止本地视频失败') }
 }
 onMounted(() => { load(); connect(); refreshTimer = window.setInterval(() => load(true), 30000) })
-onBeforeUnmount(() => { socket?.close(); clearTimeout(reconnectTimer); clearInterval(refreshTimer) })
+onBeforeUnmount(() => { socket?.close(); clearTimeout(reconnectTimer); clearInterval(refreshTimer); clearTimeout(statisticsRefreshTimer) })
 </script>
 
 <template>
@@ -136,6 +160,7 @@ onBeforeUnmount(() => { socket?.close(); clearTimeout(reconnectTimer); clearInte
         <header class="panel-header"><div><span class="section-kicker">实时画面</span><h2>{{ stream?.name || '尚未配置监测点' }}</h2></div><div class="live-state"><span class="status-dot" :class="connected && health?.dependencies.redis === 'ready' ? 'online' : 'offline'"></span>{{ !connected ? 'WebSocket 未连接' : health?.dependencies.redis === 'ready' ? '实时结果链路就绪' : 'Redis 未连接' }}</div></header>
         <div class="local-video-actions">
           <input ref="videoInput" hidden type="file" accept="video/*" @change="chooseLocalVideo" />
+          <label class="frame-step-setting">每 <el-input-number v-model="liveFrameStep" :min="1" :max="1000" :step="1" :disabled="localActive" size="small" controls-position="right" /> 帧推理一次</label>
           <el-button v-if="localActive" size="small" plain type="danger" @click="stopLocalVideo"><Square :size="14" />停止本地回放</el-button>
           <el-button v-else size="small" plain @click="videoInput?.click()"><Upload :size="14" />上传本地视频</el-button>
           <span v-if="localUploadProgress && !localActive" class="muted-text">上传 {{ localUploadProgress }}%</span>

@@ -90,6 +90,13 @@ export interface OfflineJob {
   items: OfflineJobItem[]
 }
 export interface DashboardData { statistics: Statistics; records: RecordItem[] }
+export interface RealtimeResultItem {
+  id: number; session_id: string; source_type: string; source_name: string | null; camera_id: string | null
+  track_id: number | null; frame_index?: number; captured_at: string; start_time?: string
+  ship_name: string; mmsi: string | null; draft_depth: number | null; status: string; confidence?: number | null
+  bounding_box?: Record<string, unknown> | null
+}
+export interface RealtimeResults { frames: RealtimeResultItem[]; instances: RealtimeResultItem[] }
 export interface ModelSettings {
   values: Record<string, string>
   sources: Record<string, 'override' | 'environment'>
@@ -138,6 +145,10 @@ export function getOfflineJobs() {
 
 export function getDashboard() {
   return api.get<DashboardData>('/dashboard').then(({ data }) => data)
+}
+
+export function getRealtimeResults(limit = 50) {
+  return api.get<RealtimeResults>('/realtime/results', { params: { limit } }).then(({ data }) => data)
 }
 
 export function getOfflineJob(id: string) {

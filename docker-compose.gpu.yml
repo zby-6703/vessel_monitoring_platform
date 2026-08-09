@@ -1,0 +1,17 @@
+# Optional NVIDIA GPU override. Use together with docker-compose.yml:
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+services:
+  api:
+    build:
+      args:
+        BASE_IMAGE: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+        ONNXRUNTIME_PACKAGE: onnxruntime-gpu==1.26.0
+    environment:
+      DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

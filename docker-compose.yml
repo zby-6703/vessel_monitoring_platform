@@ -1,0 +1,94 @@
+name: vesselsight
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-vessel_monitor}
+      MYSQL_USER: ${MYSQL_USER:-vessel}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env before starting Docker Compose}
+      TZ: ${TZ:-Asia/Shanghai}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+    env_file: .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-vessel}:${MYSQL_PASSWORD:-change-me}@mysql:3306/${MYSQL_DATABASE:-vessel_monitor}?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      DEVICE: ${DOCKER_DEVICE:-cpu}
+    volumes:
+      - ./data:/workspace/vessel_monitoring_platform/data
+      - ./models:/workspace/vessel_monitoring_platform/models:ro
+    ports:
+      - "8010:8010"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/frontend.Dockerfile
+    ports:
+      - "8088:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  zlmediakit:
+    image: zlmediakit/zlmediakit:master
+    profiles: [stream]
+    ports:
+      - "1935:1935"
+      - "8080:80"
+      - "8443:443"
+      - "8554:554"
+      - "10000:10000"
+      - "10000:10000/udp"
+      - "8000:8000/udp"
+      - "9000:9000/udp"
+    volumes:
+      - ./deploy/zlmediakit/config.ini:/opt/media/conf/config.ini:ro
+      - zlm_data:/opt/media/bin/www/record
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  zlm_data:

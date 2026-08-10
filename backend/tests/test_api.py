@@ -5,7 +5,13 @@ from app.main import app
 
 def test_health_and_new_jobs_route_are_available():
     with TestClient(app) as client:
-        assert client.get("/api/health").status_code == 200
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        assert {"status", "device", "realtime_status", "dependencies", "models"} <= health.json().keys()
+        streams = client.get("/api/streams")
+        assert streams.status_code == 200
+        assert len(streams.json()["items"]) == 1
+        assert {"id", "name", "status", "protocol", "play_url"} <= streams.json()["items"][0].keys()
         response = client.get("/api/jobs")
         assert response.status_code == 200
         assert isinstance(response.json()["items"], list)

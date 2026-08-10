@@ -53,14 +53,16 @@ const formatTime = (value: string) => new Date(value).toLocaleTimeString('zh-CN'
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    const [healthValue, streams, playback, dashboard, realtime] = await Promise.all([getHealth(), getStreams(), getLocalPlayback(), getDashboard(), getRealtimeResults()])
+    const [healthResult, streamsResult, playbackResult, dashboardResult, realtimeResult] = await Promise.allSettled([getHealth(), getStreams(), getLocalPlayback(), getDashboard(), getRealtimeResults()])
+    if (dashboardResult.status === 'rejected') throw dashboardResult.reason
+    const dashboard = dashboardResult.value
     statistics.value = dashboard.statistics
     records.value = dashboard.records
-    health.value = healthValue
-    stream.value = streams[0] || null
-    localPlayback.value = playback
-    if (!liveRows.value.length || !localActive.value) {
-      const persisted = [...realtime.frames, ...realtime.instances].sort((a, b) => +new Date(b.captured_at) - +new Date(a.captured_at)).slice(0, 12)
+    if (healthResult.status === 'fulfilled') health.value = healthResult.value
+    if (streamsResult.status === 'fulfilled') stream.value = streamsResult.value[0] || null
+    if (playbackResult.status === 'fulfilled') localPlayback.value = playbackResult.value
+    if (realtimeResult.status === 'fulfilled' && (!liveRows.value.length || !localActive.value)) {
+      const persisted = [...realtimeResult.value.frames, ...realtimeResult.value.instances].sort((a, b) => +new Date(b.captured_at) - +new Date(a.captured_at)).slice(0, 12)
       liveRows.value = persisted.map((row) => ({
         id: row.id, captured_at: row.captured_at, track_id: row.track_id || 0, camera_id: row.camera_id || row.source_name || 'realtime',
         ship_name: row.ship_name || 'UNKNOWN', mmsi: row.mmsi, draft_depth: row.draft_depth,
@@ -157,7 +159,7 @@ onBeforeUnmount(() => { socket?.close(); clearTimeout(reconnectTimer); clearInte
 
     <section class="monitor-grid">
       <article class="panel video-panel">
-        <header class="panel-header"><div><span class="section-kicker">实时画面</span><h2>{{ stream?.name || '尚未配置监测点' }}</h2></div><div class="live-state"><span class="status-dot" :class="connected && health?.dependencies.redis === 'ready' ? 'online' : 'offline'"></span>{{ !connected ? 'WebSocket 未连接' : health?.dependencies.redis === 'ready' ? '实时结果链路就绪' : 'Redis 未连接' }}</div></header>
+        <header class="panel-header"><div><span class="section-kicker">实时画面</span><h2>{{ stream?.name || '尚未配置监测点' }}</h2></div><div class="live-state"><span class="status-dot" :class="connected && health?.realtime_status === 'ready' ? 'online' : 'offline'"></span>{{ !connected ? 'WebSocket 未连接' : health?.realtime_status === 'ready' ? '实时结果链路就绪' : '实时链路初始化中' }}</div></header>
         <div class="local-video-actions">
           <input ref="videoInput" hidden type="file" accept="video/*" @change="chooseLocalVideo" />
           <label class="frame-step-setting">每 <el-input-number v-model="liveFrameStep" :min="1" :max="1000" :step="1" :disabled="localActive" size="small" controls-position="right" /> 帧推理一次</label>

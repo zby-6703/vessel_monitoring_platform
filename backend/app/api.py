@@ -41,7 +41,9 @@ def health():
         Redis.from_url(settings.redis_url, socket_connect_timeout=1, socket_timeout=1).ping()
         redis = "ready"
     except Exception:
-        redis = "unavailable"
+        # Redis is only needed by an external queue-based worker.  The API,
+        # WebSocket hub and local-video playback remain available without it.
+        redis = "optional"
     model_paths = (
         ("ship_detection", settings.ship_detector_config, settings.ship_detector_weights),
         ("draft_multitask", settings.draftformer_config, settings.draftformer_weights),
@@ -56,12 +58,30 @@ def health():
         }
         for name, config, weights in model_paths
     ]
+    models_ready = all(model["status"] == "ready" for model in models)
     return {
-        "status": "healthy" if database == "ready" else "degraded",
+        "status": "healthy" if database == "ready" and models_ready else "degraded",
         "environment": settings.app_env,
         "device": settings.device,
+        "realtime_status": "ready",
         "dependencies": {"database": database, "redis": redis},
         "models": models,
+    }
+
+
+@router.get("/api/streams", tags=["system"])
+def streams():
+    """Expose the configured live-monitoring source for the status UI."""
+    settings = get_effective_settings()
+    configured = bool(settings.live_stream_url)
+    return {
+        "items": [{
+            "id": settings.live_camera_id,
+            "name": settings.live_camera_name,
+            "status": "configured" if configured else "unconfigured",
+            "protocol": settings.live_stream_protocol if configured else None,
+            "play_url": settings.live_stream_url or None,
+        }]
     }
 
 

@@ -38,7 +38,7 @@ export interface Statistics {
 }
 
 export interface ModelSlot { name: string; status: string; config: string | null; weights: string | null }
-export interface Health { status: string; realtime_status: string; environment: string; demo_mode: boolean; device: string; models: ModelSlot[]; dependencies: { database: string; redis: string } }
+export interface Health { status: string; realtime_status: string; environment: string; demo_mode: boolean; device: string; models: ModelSlot[]; dependencies: { database: string; redis: 'ready' | 'optional' | 'unavailable' } }
 export interface StreamItem { id: string; name: string; status: 'configured' | 'unconfigured'; protocol: string | null; play_url: string | null }
 export interface LocalPlaybackStatus { status: 'idle' | 'starting' | 'running' | 'completed' | 'stopped' | 'failed'; session_id: string | null; filename: string | null; camera_id?: string; frame_id: number; total_frames: number; frame_step?: number; error: string | null }
 export type OfflineTask = 'region_detection' | 'ship_name_recognition' | 'draft_estimation' | 'full_pipeline'

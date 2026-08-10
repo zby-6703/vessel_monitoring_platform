@@ -21,8 +21,10 @@ const modelGroups = [
 async function load() {
   loading.value = true
   try {
-    const [healthValue, streams, settings] = await Promise.all([getHealth(), getStreams(), getModelSettings()])
-    health.value = healthValue; stream.value = streams[0] || null; modelSettings.value = settings
+    const [healthResult, streamsResult, settingsResult] = await Promise.allSettled([getHealth(), getStreams(), getModelSettings()])
+    if (healthResult.status === 'fulfilled') health.value = healthResult.value
+    if (streamsResult.status === 'fulfilled') stream.value = streamsResult.value[0] || null
+    if (settingsResult.status === 'fulfilled') modelSettings.value = settingsResult.value
   } finally { loading.value = false }
 }
 function openSettings() {
@@ -62,7 +64,7 @@ onMounted(load)
   <div class="page system-page" v-loading="loading">
     <section class="system-overview panel">
       <div class="health-hero"><div class="health-icon" :class="health?.status"><CheckCircle2 v-if="health?.status === 'healthy'" :size="30" /><AlertCircle v-else :size="30" /></div><div><span class="section-kicker">实际运行状态</span><h2>{{ health?.status === 'healthy' ? '模型文件全部就绪' : '模型配置不完整或服务未连接' }}</h2><p>状态来自后端对配置文件和权重文件的实时检查。</p></div></div>
-      <dl class="node-facts"><div><dt>计算设备</dt><dd><Cpu :size="17" />{{ health?.device?.toUpperCase() || '--' }}</dd></div><div><dt>数据库</dt><dd><Database :size="17" />{{ health?.dependencies.database === 'ready' ? '可用' : '不可用' }}</dd></div><div><dt>Redis 实时链路</dt><dd><Server :size="17" />{{ health?.dependencies.redis === 'ready' ? '可用' : '未连接' }}</dd></div></dl>
+      <dl class="node-facts"><div><dt>计算设备</dt><dd><Cpu :size="17" />{{ health?.device?.toUpperCase() || '--' }}</dd></div><div><dt>数据库</dt><dd><Database :size="17" />{{ health?.dependencies.database === 'ready' ? '可用' : '不可用' }}</dd></div><div><dt>Redis 队列（可选）</dt><dd><Server :size="17" />{{ health?.dependencies.redis === 'ready' ? '可用' : health?.dependencies.redis === 'optional' ? '未启用' : '不可用' }}</dd></div></dl>
     </section>
 
     <section class="system-grid">

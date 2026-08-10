@@ -17,14 +17,9 @@ const navItems = [
 ]
 const healthy = computed(() => health.value?.status === 'healthy')
 async function loadStatus() {
-  try {
-    const [healthValue, streams] = await Promise.all([getHealth(), getStreams()])
-    health.value = healthValue
-    stream.value = streams[0] || null
-  } catch {
-    health.value = null
-    stream.value = null
-  }
+  const [healthResult, streamsResult] = await Promise.allSettled([getHealth(), getStreams()])
+  health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
+  stream.value = streamsResult.status === 'fulfilled' ? streamsResult.value[0] || null : null
 }
 onMounted(() => { loadStatus(); statusTimer = window.setInterval(loadStatus, 15000) })
 onBeforeUnmount(() => clearInterval(statusTimer))

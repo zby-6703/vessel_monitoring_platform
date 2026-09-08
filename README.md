@@ -2,7 +2,7 @@
 
 VesselSight 是一个可独立部署的船舶视频/图像分析平台。它提供船舶与区域检测、船名识别、吃水读数估计、视频跟踪、离线批处理、结果归档，以及用于现场系统对接的实时 WebSocket 接口。
 
-源代码、运行数据和模型权重已分离：克隆本仓库即可构建服务；在执行真实推理前，只需按 [models/README.md](models/README.md) 放入经过授权的 ONNX 权重。
+源代码、运行数据和模型权重已分离：克隆本仓库即可构建服务；运行数据和模型权重已发布到 GitHub Releases：[resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0)。在执行真实推理前，只需按 [models/README.md](models/README.md) 放入对应的 ONNX 权重。
 
 ## 功能范围
 
@@ -20,8 +20,8 @@ vessel_monitoring_platform/
 ├── backend/              FastAPI 服务、推理和测试
 ├── frontend/             Vue 3 + Vite 前端
 ├── runtime_support/      独立于训练仓库的推理期算法
-├── models/               模型部署配置；权重需另行提供
-├── assets/               本地数据资产（不随仓库发布）
+├── models/               模型部署配置；权重可从 Release 获取
+├── assets/               本地数据资产（不随仓库发布；Release 中提供数据包）
 ├── data/                 本地运行数据、日志、上传和结果（不提交）
 ├── deploy/               Dockerfile、Nginx 和 ZLMediaKit 配置
 ├── docker-compose.yml    CPU 默认部署
@@ -70,7 +70,7 @@ cd vessel_monitoring_platform
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，至少替换 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` 和 `API_INGEST_TOKEN` 为强随机值。随后按 [models/README.md](models/README.md) 将三个 ONNX 权重置于 `models/`。`.env`、权重、上传文件、数据库和结果均不会被提交到 Git。
+编辑 `.env`，至少替换 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` 和 `API_INGEST_TOKEN` 为强随机值。随后从 [resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0) 下载运行数据和模型资源包，并按 release 中的目录结构解压到仓库根目录；再按 [models/README.md](models/README.md) 将三个 ONNX 权重置于 `models/`。`.env`、权重、上传文件、数据库和结果均不会被提交到 Git。
 
 ### 2. CPU 部署
 
@@ -197,7 +197,7 @@ npm run build
 1. 将 `vessel_monitoring_platform/` 复制到新的空目录并在该目录执行 `git init`。
 2. 仅提交源码、部署配置、模型配置和文档；确认 `.env`、`data/`、模型权重和业务素材没有被加入暂存区。
 3. 为项目选择并添加适用的 `LICENSE`，并确认模型、数据集和示例媒体的再分发授权。
-4. 将模型权重发布到 GitHub Releases、对象存储或受控模型仓库；提供版本号、SHA-256 和下载说明。
+4. 将模型权重和运行数据发布到 GitHub Releases、对象存储或受控模型仓库；提供版本号、SHA-256 和下载说明。
 5. 在干净的 Docker Desktop 主机上执行“通过 Docker 运行”的 CPU 流程，确认健康检查和前端可用。
 
 ## 注意事项

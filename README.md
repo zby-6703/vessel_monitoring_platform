@@ -168,6 +168,8 @@ cd ..
 .\scripts\start-dev.ps1 -CondaExe "D:\app\miniconda3\Scripts\conda.exe" -Environment Train
 ```
 
+停止脚本不需要激活 Conda 环境。即使服务是手动启动的，或 `data/logs/dev-processes.json` 丢失，也会检查 8010、5173 端口并停止已确认的平台进程；无法识别的进程会保留并提示。重复执行停止脚本会提示服务已停止。
+
 如果启动时报 `Port 8010 is already in use` 或 `Port 5173 is already in use`，通常表示平台已经运行，而不是模型错误。先执行：
 
 ```powershell

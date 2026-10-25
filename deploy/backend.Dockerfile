@@ -6,6 +6,8 @@ ARG ONNXRUNTIME_PACKAGE=onnxruntime==1.26.0
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /workspace/vessel_monitoring_platform
 
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt "${ONNXRUNTIME_PACKAGE}"
 

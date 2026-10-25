@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from typing import Literal
+
+import cv2
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from redis import Redis
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from .config import get_effective_settings, get_settings
@@ -24,6 +29,8 @@ from .database import ResultRepository, SessionLocal, engine
 from .models import RealtimeTrackingResult, RealtimeVideoResult
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
+from .recording import recording_manager
+from .live_capture import CameraCapture, onvif_control, safe_camera_error, ensure_detection_available, validate_recording_interval
 
 router = APIRouter()
 
@@ -78,9 +85,10 @@ def streams():
         "items": [{
             "id": settings.live_camera_id,
             "name": settings.live_camera_name,
-            "status": "configured" if configured else "unconfigured",
+            "status": "configured" if configured or settings.live_capture_url else "unconfigured",
             "protocol": settings.live_stream_protocol if configured else None,
             "play_url": settings.live_stream_url or None,
+            "capture_configured": bool(settings.live_capture_url),
         }]
     }
 
@@ -243,12 +251,19 @@ class _LocalPlayback:
         with self.lock:
             return dict(self.status)
 
-    def start(self, path: Path, camera_id: str, frame_step: int, loop: asyncio.AbstractEventLoop) -> dict:
+    def is_alive(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def join(self, timeout: float = 12) -> None:
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout)
+
+    def start(self, path: Path, camera_id: str, frame_step: int, loop: asyncio.AbstractEventLoop, source_name: str | None = None) -> dict:
         with self.lock:
             if self.thread and self.thread.is_alive():
                 raise RuntimeError("local video playback is already running")
             self.stop_event.clear()
-            self.status.update(status="starting", session_id=uuid.uuid4().hex, filename=path.name, camera_id=camera_id, frame_id=0, total_frames=0, frame_step=frame_step, error=None)
+            self.status.update(status="starting", session_id=uuid.uuid4().hex, filename=source_name or path.name, camera_id=camera_id, frame_id=0, total_frames=0, frame_step=frame_step, error=None)
             self.thread = threading.Thread(target=self._run, args=(path, loop), daemon=True, name="local-video-playback")
             self.thread.start()
             return dict(self.status)
@@ -267,32 +282,47 @@ class _LocalPlayback:
         result_uri = None
         session_id = None
         camera_id = None
+        failure = None
         try:
-            settings = get_settings()
-            if self.models is None:
-                self.models = ModelRegistry(settings)
-                self.models.load()
+            settings = get_effective_settings()
+            if self.models is None or self.models.settings != settings:
+                if self.models is not None:
+                    self.models.release()
+                models = ModelRegistry(settings)
+                models.load()
+                self.models = models
+            if self.stop_event.is_set():
+                return
             service = FrameInferenceService(self.models)
             storage = ResultStorage(settings.result_root, f"live-{uuid.uuid4().hex}")
-            stem = storage.source_stem(1, path.name)
+            source_name = self.snapshot()["filename"] or path.name
+            stem = storage.source_stem(1, source_name)
             repository = ResultRepository(SessionLocal)
             capture = cv2.VideoCapture(str(path))
             if not capture.isOpened():
                 raise ValueError("unable to read local video")
+            fps = float(capture.get(cv2.CAP_PROP_FPS))
+            if not math.isfinite(fps) or fps < 1 or fps > 240:
+                fps = settings.live_capture_fps
             with self.lock:
                 self.status.update(status="running", total_frames=int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 session_id, camera_id, step = self.status["session_id"], self.status["camera_id"], self.status["frame_step"]
+            validate_recording_interval(step, fps)
             tracker = TrackTrackTracker(det_thresh=.45, init_thresh=.45, match_thresh=.8, max_time_lost=30, min_len=1, min_box_area=800, class_agnostic=True)
-            aggregator = InstanceAggregator(storage.task_id, path.name, settings.track_confirm_hits, settings.track_lost_seconds, settings.track_finish_seconds)
+            aggregator = InstanceAggregator(storage.task_id, source_name, settings.track_confirm_hits, settings.track_lost_seconds, settings.track_finish_seconds)
             source_index = processed = 0
             while not self.stop_event.is_set():
                 ok, image = capture.read()
                 if not ok:
                     break
                 if source_index % step:
+                    recording_manager.process_frame(image, camera_id=str(camera_id), session_id=str(session_id),
+                        source_name=source_name, fps=fps, timestamp=source_index / fps, vessels=None)
                     source_index += 1
                     continue
-                result = service.infer(image, task_id=str(session_id), source_filename=path.name, task=TaskKind.FULL_PIPELINE, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
+                result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.FULL_PIPELINE, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
+                ensure_detection_available(result)
+                validate_recording_interval(step, fps)
                 tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
                 current = {}
                 active_ids = set()
@@ -303,7 +333,10 @@ class _LocalPlayback:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
-                repository.save_realtime_frame(result, str(session_id), "local_video", path.name, str(camera_id), result_uri)
+                live = _live_frame(result, str(camera_id), current)
+                recording_manager.process_frame(image, camera_id=str(camera_id), session_id=str(session_id),
+                    source_name=source_name, fps=fps, timestamp=source_index / fps, vessels=live["vessels"])
+                repository.save_realtime_frame(result, str(session_id), "local_video", source_name, str(camera_id), result_uri)
                 for track_id in active_ids:
                     repository.save_realtime_instance(aggregator.snapshot(track_id, result.observed_at), str(session_id), "local_video", str(camera_id), result_uri)
                 for instance in aggregator.sweep(active_ids, result.observed_at):
@@ -312,25 +345,46 @@ class _LocalPlayback:
                     repository.save_realtime_instance(instance, str(session_id), "local_video", str(camera_id), result_uri)
                 encoded_ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
                 if encoded_ok:
-                    payload = {"type": "local_playback_frame", "data": {"session_id": session_id, "frame_id": processed, "camera_id": camera_id, "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"), "frame": _live_frame(result, str(camera_id), current)}}
-                    asyncio.run_coroutine_threadsafe(hub.broadcast(payload), loop).result(timeout=5)
+                    payload = {"type": "local_playback_frame", "data": {"session_id": session_id, "frame_id": processed, "camera_id": camera_id, "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"), "frame": live}}
+                    try:
+                        pending = asyncio.run_coroutine_threadsafe(hub.broadcast(payload), loop)
+                        pending.result(timeout=5)
+                    except Exception:
+                        pending.cancel()
                 processed += 1; source_index += 1
                 with self.lock:
                     self.status["frame_id"] = processed
             with self.lock:
-                if self.status["status"] != "stopped": self.status["status"] = "completed"
+                self.status["status"] = "stopped" if self.stop_event.is_set() else "completed"
         except Exception as exc:
+            failure = str(exc)
             with self.lock:
                 self.status.update(status="failed", error=str(exc))
+            # A model load/initialization error must not leave a partly loaded
+            # registry cached and make the next run fail in an unrelated way.
+            self.models = None
         finally:
             if capture is not None:
                 capture.release()
-            if aggregator is not None and storage is not None and result_uri:
-                repository = ResultRepository(SessionLocal)
-                for instance in aggregator.finish_all(datetime.now(timezone.utc)):
-                    storage.append_video_record(stem, instance)
-                    repository.save_video_instance(instance, result_uri)
-                    repository.save_realtime_instance(instance, str(session_id), "local_video", str(camera_id), result_uri)
+            try:
+                if aggregator is not None and storage is not None and result_uri:
+                    repository = ResultRepository(SessionLocal)
+                    for instance in aggregator.finish_all(datetime.now(timezone.utc)):
+                        storage.append_video_record(stem, instance)
+                        repository.save_video_instance(instance, result_uri)
+                        repository.save_realtime_instance(instance, str(session_id), "local_video", str(camera_id), result_uri)
+            except Exception as exc:
+                failure = str(exc)
+                with self.lock:
+                    self.status.update(status="failed", error=failure)
+            try:
+                if failure:
+                    recording_manager.fail(failure)
+                else:
+                    recording_manager.finish(reason="source_stopped" if self.stop_event.is_set() else "source_completed")
+            except Exception as exc:
+                with self.lock:
+                    self.status.update(status="failed", error=str(exc))
             try:
                 asyncio.run_coroutine_threadsafe(hub.broadcast({"type": "local_playback_status", "data": self.snapshot()}), loop).result(timeout=5)
             except Exception:
@@ -338,6 +392,61 @@ class _LocalPlayback:
 
 
 local_playback = _LocalPlayback()
+camera_capture = CameraCapture(hub.broadcast, _live_frame)
+_source_lock = threading.RLock()
+
+
+async def shutdown_realtime() -> None:
+    local_playback.stop()
+    camera_capture.stop()
+    await asyncio.gather(asyncio.to_thread(local_playback.join), asyncio.to_thread(camera_capture.join))
+    await asyncio.to_thread(recording_manager.finish, reason="service_shutdown")
+
+
+class CameraStartRequest(BaseModel):
+    frame_step: int | None = Field(None, ge=1, le=1000)
+
+
+class PtzRequest(BaseModel):
+    action: Literal["zoom_in", "zoom_out", "focus_near", "focus_far", "autofocus", "stop", "home"]
+
+
+@router.get("/api/realtime/camera", tags=["realtime"])
+def camera_status():
+    return camera_capture.snapshot()
+
+
+@router.post("/api/realtime/camera/start", status_code=202, tags=["realtime"])
+async def start_camera(body: CameraStartRequest | None = None):
+    with _source_lock:
+        if local_playback.is_alive():
+            raise HTTPException(409, "请先停止本地视频回放，等待当前会话结束后再启动摄像头")
+        try:
+            return camera_capture.start(asyncio.get_running_loop(), body.frame_step if body else None)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/api/realtime/camera/stop", tags=["realtime"])
+def stop_camera():
+    return camera_capture.stop()
+
+
+@router.get("/api/camera/ptz", tags=["realtime"])
+def camera_ptz_status():
+    return onvif_control.status()
+
+
+@router.post("/api/camera/ptz", tags=["realtime"])
+def control_camera(body: PtzRequest):
+    try:
+        return onvif_control.command(body.action)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, safe_camera_error(exc, get_effective_settings())) from exc
 
 
 @router.get("/api/realtime/local-video", tags=["realtime"])
@@ -350,12 +459,30 @@ async def start_local_video(file: UploadFile = File(...), frame_step: int = Form
         raise HTTPException(422, "valid video file and frame_step are required")
     destination = get_settings().upload_root / "live"; destination.mkdir(parents=True, exist_ok=True)
     path = destination / f"{uuid.uuid4().hex}_{Path(file.filename or 'local.mp4').name}"
+    started = False
     try:
+        with _source_lock:
+            if camera_capture.is_alive() or local_playback.is_alive():
+                raise HTTPException(409, "请先停止当前摄像头采集或本地回放，等待会话结束")
+        total = 0
         with path.open("wb") as handle:
-            while chunk := await file.read(4 * 1024 * 1024): handle.write(chunk)
-        return local_playback.start(path, camera_id, frame_step, asyncio.get_running_loop())
+            while chunk := await file.read(4 * 1024 * 1024):
+                total += len(chunk)
+                if total > get_settings().max_upload_bytes:
+                    raise HTTPException(413, "视频超过上传大小限制")
+                handle.write(chunk)
+        if not total:
+            raise HTTPException(422, "上传视频不能为空")
+        with _source_lock:
+            if camera_capture.is_alive() or local_playback.is_alive():
+                raise HTTPException(409, "另一个实时源已启动，请先停止后重试")
+            result = local_playback.start(path, camera_id[:120], frame_step, asyncio.get_running_loop(), source_name=Path(file.filename or "local.mp4").name)
+            started = True
+            return result
     finally:
         await file.close()
+        if not started:
+            path.unlink(missing_ok=True)
 
 
 @router.post("/api/realtime/local-video/stop", tags=["realtime"])
@@ -395,4 +522,3 @@ async def realtime(websocket: WebSocket):
                 await websocket.send_json({"type": "heartbeat", "timestamp": datetime.now(timezone.utc).isoformat()})
     except WebSocketDisconnect:
         await hub.disconnect(websocket)
-import cv2

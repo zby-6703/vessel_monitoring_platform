@@ -12,6 +12,7 @@ VesselSight 是一个可独立部署的船舶视频/图像分析平台。它提�
 - SQLite（本地开发）或 MySQL（Docker 部署）持久化。
 - REST API、OpenAPI 文档和 Vue 前端。
 - 可选 ZLMediaKit 视频流转发；未配置流媒体时离线分析仍可使用。
+- 实时摄像头服务器采集、按过船事件保存全景及聚焦视频、历史录像检索与回看。
 
 ## 项目结构
 
@@ -135,10 +136,10 @@ cd vessel_monitoring_platform
 Copy-Item .env.example .env
 
 # GPU 环境（本机 Train 环境已有 torch 时通常选择此项）
-conda run -n Train pip install -r backend/requirements-gpu.txt
+conda run -n Train python -m pip install -r backend/requirements-gpu.txt
 
 # 或 CPU 环境
-# conda run -n Train pip install -r backend/requirements-cpu.txt
+# conda run -n Train python -m pip install -r backend/requirements-cpu.txt
 
 cd frontend
 npm ci
@@ -181,6 +182,55 @@ cd ..
 docker compose up -d redis
 ```
 
+## 过船自动录像与聚焦
+
+实时监测页可选择开启“过船录制”。检测结果连续满足确认条件后开始保存视频；预录缓冲补上船舶刚进入视野的画面，短时漏检由离场延时衔接，确认离场后自动结束。本地视频回放也接入同一流程，可在接入现场摄像头前验证设置。摄像头采集和本地回放互斥，切换前须停止当前来源并等待会话结束。
+
+每次过船保存两份无检测框的视频：完整画面的“原视频”和用于查看船体、船名及吃水区域的“聚焦视频”。这里的“原视频”是源画面逐帧重新编码的 H.264 MP4，不是摄像头码流的逐字节备份；不保留音频。全景保留源分辨率（奇数边长会取相邻偶数），本地视频保持原始帧率和时长，跳帧推理不会使录像加速。聚焦视频按画面比例裁剪后缩放，最大输出 1280×720。多船同时出现时，自动聚焦包含所有已检测船舶及其相关区域；长时间持续有船的事件会按单段时长分段。
+
+自动聚焦依据船体、船名、吃水区域和刻度的联合范围，并保留边缘余量；范围过大时自动减少放大倍率，优先保证船体完整。手动模式可自定义中心和放大倍率。数字放大只能放大现有像素，无法恢复远距离源画面中本来没有的文字或刻度细节；现场清晰度仍由光学镜头、传感器分辨率、光线和安装距离决定。光学变焦通过可选的 ONVIF 接口单独控制，不执行未经标定的自动云台转向。
+
+录像设置保存在 `data/results/passages/settings.json`，片段和索引位于 `data/results/passages/`；刷新页面或重启服务后可继续检索历史视频。默认关闭录制，默认预录 3 秒、离场延时 5 秒、连续确认 2 次、置信度阈值 0.45、单段 300 秒、存储配额 10 GB、保留 30 天。界面可调整这些值以及聚焦方式、倍率、中心和边缘余量。到期或超过配额的历史片段自动清理；磁盘、编码和来源错误会显示在录像状态中。正在录制或转码的片段完成后才能正常回看，开启录制需要服务端 PATH 中有带 `libx264` 的 `ffmpeg`；Docker 镜像已安装。预录缓冲同时受 64 MB 内存上限限制，高分辨率下实际预录时间可能短于设置值。
+
+摄像头由后端持续采集，浏览器关闭不影响已经启动的采集和录像；API 服务需要保持运行。服务重启后需要重新启动摄像头采集。本功能采用单进程内的采集与录像管理器，部署时使用一个 API worker；横向扩展需将各摄像头分配到独立采集服务并持久化共享索引。
+
+### 摄像头接入
+
+在 `.env` 配置后重启 API，然后在实时监测页启动摄像头采集：
+
+```dotenv
+LIVE_CAMERA_ID=camera-01
+LIVE_CAMERA_NAME=现场监测点 01
+LIVE_CAPTURE_URL=rtsp://username:password@192.168.1.100:554/stream1
+LIVE_CAPTURE_FRAME_STEP=3
+LIVE_CAPTURE_FPS=25
+```
+
+`LIVE_CAPTURE_URL` 是仅由服务器读取的 RTSP 或可被 FFmpeg 解码的直接 HTTP 视频流，不会通过状态接口返回给浏览器。`LIVE_STREAM_URL` 仍是可选的浏览器预览地址，可使用 ZLMediaKit 转出的 HTTP-FLV。仅设置预览地址不会启动服务端检测或自动录像。`LIVE_CAPTURE_FRAME_STEP` 控制送入模型的采样间隔；采集线程始终将每帧交给录像器，模型繁忙时推理队列只保留最新一帧。`LIVE_CAPTURE_FPS` 仅在来源未报告有效帧率时作为后备值。网络中断会结束本次事件并显示错误，检查网络后可重新启动；模型不可用时直接报告失败，不产生模拟检测。
+
+开启录制时，推理采样间隔（跳帧数÷源帧率）必须小于离场延时的一半；现场推理结果的实际间隔也必须短于离场延时。服务会检查初始采样及后续结果，间隔过长时明确停止并提示减少跳帧、提高离场延时或优化模型速度，避免一直检测却无法触发确认录像。船舶检测器故障会结束会话并显示错误；仅船名 OCR 或吃水估计失败时继续保留可用的船舶检测及录像。
+
+可选的 ONVIF 光学变焦及镜头对焦需要从摄像头配置或厂商 ONVIF 工具取得真实服务地址和 Token：
+
+```dotenv
+CAMERA_ONVIF_PTZ_URL=http://192.168.1.100/onvif/ptz_service
+CAMERA_ONVIF_PROFILE_TOKEN=MainProfile
+CAMERA_ONVIF_IMAGING_URL=http://192.168.1.100/onvif/imaging_service
+CAMERA_ONVIF_SOURCE_TOKEN=VideoSource_1
+CAMERA_ONVIF_USERNAME=username
+CAMERA_ONVIF_PASSWORD=password
+```
+
+PTZ 服务与媒体 Profile Token 用于光学放大、缩小、停止和返回设备已设原位；Imaging 服务与 VideoSource Token 用于近焦、远焦和自动对焦。设备需实际支持对应 [ONVIF PTZ](https://www.onvif.org/ver20/ptz/wsdl/) 与 [Imaging](https://www.onvif.org/specs/2206/ONVIF-Imaging-Service-Spec-v2206.pdf) 操作。接口使用 HTTP Digest 和 WS-Security UsernameToken 摘要认证，摄像头时间需与服务器同步。不支持的设备、Token 错误和身份验证失败会明确返回错误；未配置设备时不会假装已经执行物理变焦。
+
+### 相关 API
+
+- `GET /api/realtime/camera`、`POST /api/realtime/camera/start`、`POST /api/realtime/camera/stop`：服务器采集状态、启动和停止；启动可传 `{"frame_step": 3}`。
+- `GET /api/camera/ptz`、`POST /api/camera/ptz`：设备能力检查和手动镜头命令，命令体为 `{"action": "zoom_in"}`，也支持 `zoom_out`、`focus_near`、`focus_far`、`autofocus`、`stop`、`home`。
+- `GET/PUT /api/recording/settings`、`GET /api/recording/status`：录制配置与运行状态。
+- `GET /api/recordings`：按关键词、来源、时间和页码查询；`GET /api/recordings/{id}/original` 或 `/focused` 用于播放，加 `?download=true` 下载；`DELETE /api/recordings/{id}` 删除完成的片段。
+- `/ws/realtime`：摄像头发布 `camera_frame` / `camera_status`，本地回放发布 `local_playback_frame` / `local_playback_status`；帧数据均包含 `session_id`、`camera_id`、`frame_id`、JPEG `image` 和结构化 `frame`。
+
 ## 测试与构建
 
 ```powershell
@@ -204,5 +254,5 @@ npm run build
 
 - 不提供权重时，平台可以启动，但真实推理任务会失败并报告模型缺失；不会使用虚构检测结果替代。
 - Docker 默认使用 CPU 以保证可移植性；GPU 性能部署必须使用 `docker-compose.gpu.yml`。
-- 当前实时入口用于接收外部实例事件和本地视频回放；Redis 队列式独立推理 worker 不包含在本仓库中。
+- 当前实时入口支持服务器摄像头采集、本地视频回放和外部实例事件；Redis 队列式独立推理 worker 不包含在本仓库中。
 - 对公网部署前必须修改 `.env` 中的密码和令牌，并通过防火墙/反向代理限制 MySQL、Redis、API 和流媒体端口。

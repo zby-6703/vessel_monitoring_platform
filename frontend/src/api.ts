@@ -104,6 +104,88 @@ export interface ModelSettings {
   message?: string
 }
 
+export interface RecordingSettings {
+  enabled: boolean
+  pre_roll_seconds: number
+  post_roll_seconds: number
+  min_hits: number
+  confidence_threshold: number
+  max_clip_seconds: number
+  max_storage_gb: number
+  retention_days: number
+  focus_mode: 'auto' | 'manual'
+  zoom_factor: number
+  center_x: number
+  center_y: number
+  padding: number
+}
+export const defaultRecordingSettings = (): RecordingSettings => ({
+  enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 2,
+  confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
+  retention_days: 30, focus_mode: 'auto', zoom_factor: 2, center_x: .5, center_y: .5, padding: .2,
+})
+export interface RecordingStatus {
+  state: 'disabled' | 'armed' | 'recording' | 'error'
+  active_id: string | null
+  buffer_seconds: number
+  error: string | null
+  source_name: string | null
+  storage_bytes: number
+  zoom_capability: 'digital'
+  focus: { x: number; y: number; width: number; height: number } | null
+}
+export interface RecordingItem {
+  id: string
+  camera_id: string
+  source_name: string
+  started_at: string
+  ended_at: string | null
+  duration_seconds: number
+  status: 'completed' | 'interrupted' | 'failed' | 'recording' | 'processing'
+  reason: string | null
+  ship_names: string[]
+  track_ids: number[]
+  bytes: number
+  original_url: string | null
+  focused_url: string | null
+  thumbnail_url: string | null
+  has_focus: boolean
+}
+export interface CameraStatus {
+  status: 'idle' | 'starting' | 'running' | 'stopped' | 'failed'
+  configured: boolean
+  session_id: string | null
+  camera_id: string
+  filename: string | null
+  frame_id: number
+  error: string | null
+}
+export interface PtzStatus { configured: boolean; supported: boolean; focus_supported?: boolean; error: string | null }
+export type PtzAction = 'zoom_in' | 'zoom_out' | 'focus_near' | 'focus_far' | 'autofocus' | 'stop' | 'home'
+
+export function getRecordingSettings() { return api.get<RecordingSettings>('/recording/settings').then(({ data }) => data) }
+export function updateRecordingSettings(settings: RecordingSettings) { return api.put<RecordingSettings>('/recording/settings', settings).then(({ data }) => data) }
+export function getRecordingStatus() { return api.get<RecordingStatus>('/recording/status').then(({ data }) => data) }
+export function getRecordings(params: Record<string, unknown> = {}) {
+  return api.get<{ items: RecordingItem[]; total: number; page: number; page_size: number }>('/recordings', { params }).then(({ data }) => data)
+}
+export function deleteRecording(id: string) { return api.delete(`/recordings/${encodeURIComponent(id)}`) }
+export function getCameraStatus() { return api.get<CameraStatus>('/realtime/camera').then(({ data }) => data) }
+export function startCamera(frameStep = 3) { return api.post<CameraStatus>('/realtime/camera/start', { frame_step: frameStep }, { timeout: 0 }).then(({ data }) => data) }
+export function stopCamera() { return api.post<CameraStatus>('/realtime/camera/stop').then(({ data }) => data) }
+export function getPtzStatus() { return api.get<PtzStatus>('/camera/ptz').then(({ data }) => data) }
+export function controlPtz(action: PtzAction) { return api.post('/camera/ptz', { action }).then(({ data }) => data) }
+
+export function formatBytes(bytes: number) {
+  if (!bytes) return '0 MB'
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`
+}
+
+export function apiError(error: unknown, fallback: string) {
+  const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
+  return typeof detail === 'string' ? detail : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg || '参数无效').join('；') : fallback
+}
+
 export const api = axios.create({ baseURL: '/api', timeout: 10000 })
 
 export function getRecords(params: Record<string, unknown> = {}) {

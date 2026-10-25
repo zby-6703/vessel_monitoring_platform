@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Activity, FileSearch, Menu, RadioTower, ServerCog, Ship, X } from 'lucide-vue-next'
+import { Activity, FileSearch, Film, Menu, RadioTower, ServerCog, Ship, X } from 'lucide-vue-next'
 import { getHealth, getStreams, type Health, type StreamItem } from './api'
 
 const route = useRoute()
@@ -12,6 +12,7 @@ let statusTimer: number | undefined
 const pageTitle = computed(() => route.meta.title || '监测平台')
 const navItems = [
   { to: '/', label: '实时监测', icon: Activity },
+  { to: '/recordings', label: '通行视频', icon: Film },
   { to: '/offline', label: '离线分析', icon: FileSearch },
   { to: '/system', label: '系统状态', icon: ServerCog },
 ]

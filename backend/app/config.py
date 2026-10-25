@@ -55,6 +55,16 @@ class Settings:
     live_camera_name: str = os.getenv("LIVE_CAMERA_NAME", "现场监测点 01")
     live_stream_url: str = os.getenv("LIVE_STREAM_URL", "").strip()
     live_stream_protocol: str = os.getenv("LIVE_STREAM_PROTOCOL", "HTTP-FLV")
+    # Private server-side source; never included in browser/API responses.
+    live_capture_url: str = os.getenv("LIVE_CAPTURE_URL", "").strip()
+    live_capture_frame_step: int = max(1, int(os.getenv("LIVE_CAPTURE_FRAME_STEP", "3")))
+    live_capture_fps: float = max(1.0, min(120.0, float(os.getenv("LIVE_CAPTURE_FPS", "25"))))
+    camera_onvif_ptz_url: str = os.getenv("CAMERA_ONVIF_PTZ_URL", "").strip()
+    camera_onvif_imaging_url: str = os.getenv("CAMERA_ONVIF_IMAGING_URL", "").strip()
+    camera_onvif_profile_token: str = os.getenv("CAMERA_ONVIF_PROFILE_TOKEN", "").strip()
+    camera_onvif_source_token: str = os.getenv("CAMERA_ONVIF_SOURCE_TOKEN", "").strip()
+    camera_onvif_username: str = os.getenv("CAMERA_ONVIF_USERNAME", "").strip()
+    camera_onvif_password: str = os.getenv("CAMERA_ONVIF_PASSWORD", "")
     # Self-contained ONNX deployment packages.
     ship_detector_config: Path | None = _path_env(
         "SHIP_DETECTOR_CONFIG", "./models/shipdetr_DetShip-new/deploy_config.yaml"

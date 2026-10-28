@@ -530,3 +530,31 @@ img { display: block; max-width: 100%; }
   .recording-playback-heading { flex-direction: column; align-items: flex-start; } .recording-playback-facts { grid-template-columns: repeat(2, 1fr); } .recording-playback-facts > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); } .recording-dialog-footer { flex-wrap: wrap; gap: 10px; } .monitor-footnote { gap: 8px; }
 }
 @media (max-width: 540px) { .recording-card-grid { grid-template-columns: 1fr; } .monitor-source-bar { padding-inline: 12px; } .monitor-footnote { font-size: 9px; } .monitor-footnote span:last-child { display: none; } .focus-click-hint { font-size: 8px; bottom: 54px; } .focus-view-switch { top: 44px; } .recording-storage { font-size: 9px; } }
+
+/* Physical optical zoom cycles remain distinct from digital preview controls. */
+.recording-mode-options { margin-bottom: 16px; }
+.optical-cycle-stages { display: grid; list-style: none; gap: 0; margin: 18px 0; padding: 0; }
+.optical-cycle-stages li { position: relative; display: flex; align-items: center; gap: 9px; min-height: 34px; color: var(--text-muted); font-size: 10px; }
+.optical-cycle-stages li:not(:last-child)::after { content: ''; position: absolute; left: 10px; top: 25px; width: 1px; height: 17px; background: var(--border-strong); }
+.optical-cycle-stages li > span { z-index: 1; display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface); font: 9px 'Fira Code', monospace; }
+.optical-cycle-stages li strong { font-weight: 400; }
+.optical-cycle-stages li.active { color: #b8eef1; }
+.optical-cycle-stages li.active > span { color: #b8eef1; background: #21434c; border-color: var(--primary); box-shadow: 0 0 0 4px rgb(33 168 181 / 8%); }
+.optical-cycle-stages li.passed { color: #91c4b4; }
+.optical-cycle-stages li.passed > span { border-color: #427360; background: #1b3029; }
+.optical-zoom-setting { display: grid; grid-template-columns: 1fr 118px; gap: 8px 14px; align-items: center; font-size: 11px; }
+.optical-zoom-setting .el-input-number, .optical-zoom-setting .el-select { width: 118px; }
+.optical-zoom-setting > span { grid-column: 1 / -1; text-align: right; font-size: 9px; color: var(--text-muted); }
+.optical-capability { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding: 9px 10px; color: #e9c38b; border: 1px solid #63523a; background: rgb(154 116 51 / 8%); font-size: 10px; line-height: 1.6; }
+.optical-capability.ready { color: #a5d6b9; border-color: #3c6351; background: rgb(70 135 92 / 8%); }
+.optical-capability > svg { flex-shrink: 0; }
+.optical-capability > span { flex: 1; overflow-wrap: anywhere; }
+.optical-capability .el-button { margin: 0; padding: 4px; }
+.optical-local-note { padding: 10px 12px; color: #e9c38b; border: 1px solid #63523a; background: rgb(154 116 51 / 8%); font-size: 10px; line-height: 1.7; }
+.optical-live-facts { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; color: var(--text-muted); font-size: 10px; }
+.optical-live-facts strong { color: var(--text-secondary); font-weight: 500; }
+.optical-monitor-state { position: absolute; top: 48px; right: 13px; z-index: 6; display: flex; align-items: center; flex-wrap: wrap; gap: 5px 7px; max-width: calc(100% - 26px); padding: 8px 10px; color: #b8eef1; border: 1px solid rgb(105 171 179 / 50%); border-radius: 3px; background: rgb(8 20 25 / 90%); font-size: 10px; }
+.optical-monitor-state strong { font-weight: 500; }
+.optical-monitor-state > span { color: #99adb6; }
+.optical-playback-badge { padding: 7px 9px; color: #b4dbe0 !important; border: 1px solid #3a5c65; background: #182d34; white-space: nowrap; font-size: 10px; }
+@media (max-width: 540px) { .optical-monitor-state { top: 43px; padding: 6px 7px; font-size: 9px; } .optical-monitor-state > span { flex-basis: 100%; } }

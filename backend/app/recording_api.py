@@ -50,7 +50,7 @@ def delete_recording(recording_id: str):
 
 
 @router.get("/api/recordings/{recording_id}/{kind}")
-def media(recording_id: str, kind: Literal["original", "focused", "thumbnail"], download: bool = False):
+def media(recording_id: str, kind: Literal["original", "focused", "thumbnail", "cycle"], download: bool = False):
     try:
         path = recording_manager.media_path(recording_id, kind)
     except FileNotFoundError as exc:

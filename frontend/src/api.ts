@@ -105,6 +105,7 @@ export interface ModelSettings {
 }
 
 export interface RecordingSettings {
+  recording_mode: 'optical_cycle' | 'passage'
   enabled: boolean
   pre_roll_seconds: number
   post_roll_seconds: number
@@ -118,12 +119,18 @@ export interface RecordingSettings {
   center_x: number
   center_y: number
   padding: number
+  departure_confirm_seconds: number
+  zoom_settle_timeout_seconds: number
+  overview_settle_seconds: number
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
-  enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 2,
+  recording_mode: 'optical_cycle', enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 1,
   confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
-  retention_days: 30, focus_mode: 'auto', zoom_factor: 2, center_x: .5, center_y: .5, padding: .2,
+  retention_days: 30, focus_mode: 'auto', zoom_factor: 3, center_x: .5, center_y: .5, padding: .2,
+  departure_confirm_seconds: 1, zoom_settle_timeout_seconds: 15, overview_settle_seconds: .5,
 })
+export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'error'
+export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待船头进入放大视野' : ({ overview: '1× 全景待船', initializing: '正在归位至 1×', zooming_in: '正在光学放大', zoomed: '固定倍率录制船头至船尾', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新检测', error: '光学循环异常' }[phase || 'overview'])
 export interface RecordingStatus {
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null
@@ -131,7 +138,13 @@ export interface RecordingStatus {
   error: string | null
   source_name: string | null
   storage_bytes: number
-  zoom_capability: 'digital'
+  zoom_capability: 'digital' | 'optical'
+  phase?: OpticalCyclePhase
+  current_zoom_factor?: number | null
+  target_zoom_factor?: number
+  cycle_count?: number
+  zoom_driver?: 'optical' | 'digital' | null
+  awaiting_zoomed_target?: boolean
   focus: { x: number; y: number; width: number; height: number } | null
 }
 export interface RecordingItem {
@@ -150,6 +163,14 @@ export interface RecordingItem {
   focused_url: string | null
   thumbnail_url: string | null
   has_focus: boolean
+  cycle_url?: string | null
+  recording_mode?: 'optical_cycle' | 'passage'
+  cycle_index?: number
+  optical_zoom_factor?: number
+  returned_to_overview?: boolean
+  error?: string | null
+  zoom_factor?: number
+  settings?: Partial<RecordingSettings>
 }
 export interface CameraStatus {
   status: 'idle' | 'starting' | 'running' | 'stopped' | 'failed'
@@ -160,7 +181,11 @@ export interface CameraStatus {
   frame_id: number
   error: string | null
 }
-export interface PtzStatus { configured: boolean; supported: boolean; focus_supported?: boolean; error: string | null }
+export interface PtzStatus {
+  configured: boolean; supported: boolean; focus_supported?: boolean; error: string | null
+  absolute_zoom_supported?: boolean; calibrated?: boolean; magnifications?: number[]
+  cycle_supported?: boolean; zoom_error?: string | null
+}
 export type PtzAction = 'zoom_in' | 'zoom_out' | 'focus_near' | 'focus_far' | 'autofocus' | 'stop' | 'home'
 
 export function getRecordingSettings() { return api.get<RecordingSettings>('/recording/settings').then(({ data }) => data) }
@@ -173,7 +198,7 @@ export function deleteRecording(id: string) { return api.delete(`/recordings/${e
 export function getCameraStatus() { return api.get<CameraStatus>('/realtime/camera').then(({ data }) => data) }
 export function startCamera(frameStep = 3) { return api.post<CameraStatus>('/realtime/camera/start', { frame_step: frameStep }, { timeout: 0 }).then(({ data }) => data) }
 export function stopCamera() { return api.post<CameraStatus>('/realtime/camera/stop').then(({ data }) => data) }
-export function getPtzStatus() { return api.get<PtzStatus>('/camera/ptz').then(({ data }) => data) }
+export function getPtzStatus() { return api.get<PtzStatus>('/camera/ptz', { timeout: 30000 }).then(({ data }) => data) }
 export function controlPtz(action: PtzAction) { return api.post('/camera/ptz', { action }).then(({ data }) => data) }
 
 export function formatBytes(bytes: number) {

@@ -65,6 +65,11 @@ class Settings:
     camera_onvif_source_token: str = os.getenv("CAMERA_ONVIF_SOURCE_TOKEN", "").strip()
     camera_onvif_username: str = os.getenv("CAMERA_ONVIF_USERNAME", "").strip()
     camera_onvif_password: str = os.getenv("CAMERA_ONVIF_PASSWORD", "")
+    camera_onvif_ptz_configuration_token: str = os.getenv("CAMERA_ONVIF_PTZ_CONFIGURATION_TOKEN", "").strip()
+    camera_onvif_zoom_space_uri: str = os.getenv("CAMERA_ONVIF_ZOOM_SPACE_URI", "").strip()
+    camera_onvif_zoom_calibration: str = os.getenv("CAMERA_ONVIF_ZOOM_CALIBRATION", "").strip()
+    camera_onvif_zoom_timeout: float = max(2., min(60., float(os.getenv("CAMERA_ONVIF_ZOOM_TIMEOUT", "15"))))
+    camera_onvif_zoom_tolerance: float = max(.0001, min(.05, float(os.getenv("CAMERA_ONVIF_ZOOM_TOLERANCE", ".005"))))
     # Self-contained ONNX deployment packages.
     ship_detector_config: Path | None = _path_env(
         "SHIP_DETECTOR_CONFIG", "./models/shipdetr_DetShip-new/deploy_config.yaml"

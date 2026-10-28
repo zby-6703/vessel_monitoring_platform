@@ -245,6 +245,17 @@ def test_manual_focus_clamps_to_source_edges():
     assert rectangle == {"x": 0, "y": .75, "width": .25, "height": .25}
 
 
+def test_local_preview_of_an_optical_setting_uses_bounded_digital_zoom(tmp_path: Path):
+    manager = enabled_manager(tmp_path, recording_mode="optical_cycle", zoom_factor=40, focus_mode="manual")
+    feed(manager, 0, [vessel()])
+    assert manager.focus["width"] == pytest.approx(1 / 8)
+    item = manager.list_recordings()["items"][0]
+    assert item["recording_mode"] == "passage"
+    assert item["settings"]["zoom_factor"] == 8
+    assert item["settings"]["recording_mode"] == "passage"
+    assert manager.current_zoom_factor is None
+
+
 def test_long_passage_is_split_without_losing_source_frames(tmp_path: Path):
     manager = enabled_manager(tmp_path, max_clip_seconds=5)
     for index in range(111):

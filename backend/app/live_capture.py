@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import math
 import os
 import queue
@@ -71,6 +72,11 @@ def validate_recording_interval(frame_step: int, fps: float, *, inference_second
     config = recording_manager.get_settings()
     if not config["enabled"]:
         return
+    if config.get("recording_mode") == "optical_cycle":
+        # Optical departure needs consecutive NEW empty observations; an
+        # inference gap is not an empty scene. Legacy post-roll timing is not
+        # the departure-confirmation policy of this mode.
+        return
     delay = config["post_roll_seconds"]
     interval = frame_step / fps
     if interval >= delay / 2:
@@ -105,6 +111,10 @@ class CameraCapture:
         with self.lock:
             if self.is_alive():
                 raise RuntimeError("摄像头采集仍在运行或停止中")
+            recording_manager.set_zoom_controller(onvif_control)
+            config = recording_manager.get_settings()
+            if config.get("enabled") and config.get("recording_mode") == "optical_cycle":
+                onvif_control.validate_cycle(config["zoom_factor"])
             self.stop_event.clear()
             self._inference_error = None
             self._status.update(status="starting", session_id=uuid.uuid4().hex,
@@ -167,21 +177,26 @@ class CameraCapture:
             self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
             frame_index = 0
             while not self.stop_event.is_set():
+                # Tag before read and before processing prior results can issue
+                # a lens command. A frame captured across a transition remains
+                # stale rather than being relabelled as the new field of view.
+                captured_context = recording_manager.zoom_observation_context()
                 ok, image = capture.read()
                 if not ok:
                     if self.stop_event.is_set():
                         break
                     raise RuntimeError("摄像头视频中断；本次片段已结束，请检查连接后重新启动采集")
                 timestamp = time.monotonic()
-                vessels = None
+                vessels = observation_context = None
                 try:
-                    vessels = detections.get_nowait()
+                    vessels, observation_context = detections.get_nowait()
                 except queue.Empty:
                     pass
                 recording_manager.process_frame(image, camera_id=session["camera_id"], session_id=session["session_id"],
-                    source_name=settings.live_camera_name, fps=fps, timestamp=timestamp, vessels=vessels)
+                    source_name=settings.live_camera_name, fps=fps, timestamp=timestamp, vessels=vessels,
+                    source_type="camera", observation_context=observation_context)
                 if frame_index % frame_step == 0:
-                    _replace_latest(frames, (frame_index, image.copy(), datetime.now(timezone.utc)))
+                    _replace_latest(frames, (frame_index, image.copy(), datetime.now(timezone.utc), captured_context))
                 frame_index += 1
                 with self.lock:
                     self._status["frame_id"] = frame_index
@@ -231,6 +246,7 @@ class CameraCapture:
         result_uri = None
         processed = 0
         last_detection_at = None
+        last_generation = None
         try:
             storage = ResultStorage(settings.result_root, f"live-{uuid.uuid4().hex}")
             source_name = settings.live_camera_name
@@ -242,7 +258,7 @@ class CameraCapture:
                                             settings.track_lost_seconds, settings.track_finish_seconds)
             while not self.stop_event.is_set():
                 try:
-                    source_index, image, observed_at = frames.get(timeout=.2)
+                    source_index, image, observed_at, observation_context = frames.get(timeout=.2)
                 except queue.Empty:
                     continue
                 infer_started = time.monotonic()
@@ -250,8 +266,15 @@ class CameraCapture:
                     task=TaskKind.FULL_PIPELINE, observed_at=observed_at, frame_index=source_index, source_frame_index=source_index)
                 ensure_detection_available(result)
                 detection_at = time.monotonic()
+                generation = observation_context.get("generation") if observation_context else None
+                if generation != last_generation:
+                    last_detection_at = None
+                    last_generation = generation
                 elapsed = detection_at - (last_detection_at if last_detection_at is not None else infer_started)
-                validate_recording_interval(session["frame_step"], session["fps"], inference_seconds=elapsed)
+                # A lens move deliberately changes the field of view. Those
+                # observations are tagged and cannot act as entry/exit evidence.
+                validate_recording_interval(session["frame_step"], session["fps"],
+                    inference_seconds=elapsed if not observation_context or observation_context.get("accept_detections") else None)
                 last_detection_at = detection_at
                 if self.stop_event.is_set():
                     break
@@ -264,7 +287,7 @@ class CameraCapture:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 live = self.live_frame(result, session["camera_id"], current)
-                _replace_latest(detections, live["vessels"])
+                _replace_latest(detections, (live["vessels"], observation_context))
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
                 repository.save_realtime_frame(result, session["session_id"], "camera", source_name, session["camera_id"], result_uri)
                 for track_id in active_ids:
@@ -296,12 +319,155 @@ class CameraCapture:
 
 
 class OnvifControl:
-    """Small manual ONVIF adapter; no uncalibrated autonomous camera movement."""
+    """Manual lens control and calibrated, absolute optical zoom movements."""
     PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
     IMAGING = "http://www.onvif.org/ver20/imaging/wsdl"
+    SCHEMA = "http://www.onvif.org/ver10/schema"
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self._cancel_move = threading.Event()
+        self._options_cache: tuple | None = None
+
+    def cancel_move(self) -> None:
+        self._cancel_move.set()
+
+    @staticmethod
+    def _calibration(settings: Settings) -> dict[float, float]:
+        try:
+            document = json.loads(settings.camera_onvif_zoom_calibration)
+            if not isinstance(document, dict):
+                raise ValueError
+            calibration = {float(factor): float(position) for factor, position in document.items()}
+            if len(calibration) != len(document) or len(calibration) < 2 or 1. not in calibration:
+                raise ValueError
+            if not all(math.isfinite(factor) and factor >= 1 and math.isfinite(position) for factor, position in calibration.items()):
+                raise ValueError
+            positions = [calibration[factor] for factor in sorted(calibration)]
+            differences = [b - a for a, b in zip(positions, positions[1:])]
+            if not all(value > 0 for value in differences) and not all(value < 0 for value in differences):
+                raise ValueError
+            return calibration
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("需要配置真实光学倍率标定 CAMERA_ONVIF_ZOOM_CALIBRATION，包含 1× 和至少一个放大倍率，且镜头位置须单调且不重复") from exc
+
+    def validate_cycle(self, factor: float) -> None:
+        """Validate local calibration without sending a physical movement."""
+        settings = get_effective_settings()
+        if not self.configured(settings):
+            raise ValueError("光学循环录制需要配置 ONVIF PTZ 地址和媒体 Profile Token")
+        calibration = self._calibration(settings)
+        if not math.isfinite(factor) or factor <= 1 or factor not in calibration:
+            raise ValueError(f"光学倍率 {factor:g}× 未标定，请配置该倍率对应的镜头位置；不会用数字裁剪或估算位置替代")
+
+    def _zoom_options(self, settings: Settings) -> dict:
+        """Resolve the selected profile's declared absolute, non-digital space."""
+        key = (settings.camera_onvif_ptz_url, settings.camera_onvif_profile_token,
+               settings.camera_onvif_ptz_configuration_token, settings.camera_onvif_zoom_space_uri,
+               settings.camera_onvif_username, settings.camera_onvif_password)
+        if self._options_cache and self._options_cache[0] == key and time.monotonic() - self._options_cache[1] < 30:
+            return dict(self._options_cache[2])
+        configuration = settings.camera_onvif_ptz_configuration_token
+        if not configuration:
+            document = self._request(settings, self.PTZ, "GetCompatibleConfigurations",
+                f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
+            candidates = {element.attrib["token"] for element in document.iter()
+                          if element.tag.rsplit("}", 1)[-1] == "PTZConfiguration" and element.attrib.get("token")}
+            if len(candidates) != 1:
+                raise ValueError("无法唯一确定 PTZ 配置，请配置 CAMERA_ONVIF_PTZ_CONFIGURATION_TOKEN")
+            configuration = candidates.pop()
+        document = self._request(settings, self.PTZ, "GetConfigurationOptions",
+            f"<t:ConfigurationToken>{escape(configuration)}</t:ConfigurationToken>")
+        spaces = []
+        for element in document.findall(f".//{{{self.SCHEMA}}}AbsoluteZoomPositionSpace"):
+            uri = element.findtext(f"{{{self.SCHEMA}}}URI") or element.findtext(f"{{{self.SCHEMA}}}SpaceURI")
+            if not uri or "digital" in uri.lower():
+                continue
+            if settings.camera_onvif_zoom_space_uri and uri != settings.camera_onvif_zoom_space_uri:
+                continue
+            try:
+                low = float(element.findtext(f"{{{self.SCHEMA}}}XRange/{{{self.SCHEMA}}}Min", "nan"))
+                high = float(element.findtext(f"{{{self.SCHEMA}}}XRange/{{{self.SCHEMA}}}Max", "nan"))
+            except ValueError:
+                continue
+            if math.isfinite(low) and math.isfinite(high) and high > low:
+                spaces.append({"space": uri, "min": low, "max": high})
+        if not spaces:
+            raise ValueError("摄像头未声明可用的绝对光学变焦空间，不能执行指定倍率循环")
+        if len(spaces) != 1:
+            raise ValueError("摄像头声明多个绝对变焦空间，请配置 CAMERA_ONVIF_ZOOM_SPACE_URI")
+        result = spaces[0]
+        self._options_cache = (key, time.monotonic(), result)
+        return dict(result)
+
+    def _validate_positions(self, calibration: dict[float, float], options: dict) -> None:
+        if any(position < options["min"] or position > options["max"] for position in calibration.values()):
+            raise ValueError("倍率标定中的镜头位置超出摄像头声明的绝对变焦范围")
+
+    def _read_zoom_status(self, settings: Settings) -> tuple[float, str | None, str | None]:
+        document = self._request(settings, self.PTZ, "GetStatus",
+            f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
+        return self._parse_zoom_status(document)
+
+    def _parse_zoom_status(self, document: ET.Element) -> tuple[float, str | None, str | None]:
+        zoom = document.find(f".//{{{self.SCHEMA}}}Position/{{{self.SCHEMA}}}Zoom")
+        if zoom is None:
+            raise RuntimeError("摄像头未返回绝对变焦位置，无法确认指定倍率或 1× 复位")
+        try:
+            position = float(zoom.attrib.get("x", "nan"))
+        except ValueError as exc:
+            raise RuntimeError("摄像头返回无效的变焦位置") from exc
+        if not math.isfinite(position):
+            raise RuntimeError("摄像头返回无效的变焦位置")
+        movement = document.findtext(f".//{{{self.SCHEMA}}}MoveStatus/{{{self.SCHEMA}}}Zoom")
+        return position, movement.strip().upper() if movement else None, zoom.attrib.get("space")
+
+    def _stop_zoom(self, settings: Settings) -> None:
+        self._request(settings, self.PTZ, "Stop",
+            f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken><t:PanTilt>false</t:PanTilt><t:Zoom>true</t:Zoom>")
+
+    def move_to(self, factor: float) -> dict:
+        """Move only the lens; return only after a calibrated position settles."""
+        settings = get_effective_settings()
+        self.validate_cycle(factor if factor != 1 else max(self._calibration(settings)))
+        calibration = self._calibration(settings)
+        if factor not in calibration:
+            raise ValueError("请求的光学倍率未标定")
+        with self.lock:
+            self._cancel_move.clear()
+            options = self._zoom_options(settings)
+            self._validate_positions(calibration, options)
+            target = calibration[factor]
+            tolerance = (options["max"] - options["min"]) * settings.camera_onvif_zoom_tolerance
+            _, _, reported_space = self._read_zoom_status(settings)
+            if reported_space and reported_space != options["space"]:
+                raise RuntimeError("摄像头状态使用了不同的变焦坐标空间，无法核对倍率")
+            profile = f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>"
+            body = profile + f'<t:Position><tt:Zoom x="{target:.12g}" space="{escape(options["space"], {chr(34): "&quot;"})}"/></t:Position>'
+            deadline = time.monotonic() + settings.camera_onvif_zoom_timeout
+            stable_reads = 0
+            try:
+                self._request(settings, self.PTZ, "AbsoluteMove", body)
+                while time.monotonic() < deadline:
+                    if self._cancel_move.is_set():
+                        raise RuntimeError("光学变焦动作已取消")
+                    position, movement, space = self._read_zoom_status(settings)
+                    if self._cancel_move.is_set():
+                        raise RuntimeError("光学变焦动作已取消")
+                    if space and space != options["space"]:
+                        raise RuntimeError("摄像头状态使用了不同的变焦坐标空间，无法核对倍率")
+                    at_target = abs(position - target) <= tolerance
+                    stable_reads = stable_reads + 1 if at_target else 0
+                    if at_target and (movement == "IDLE" or movement is None and stable_reads >= 2):
+                        return {"factor": factor, "position": position, "settled": True}
+                    self._cancel_move.wait(.1)
+                raise RuntimeError(f"摄像头未在限定时间到达光学 {factor:g}×，录制循环已暂停")
+            except Exception:
+                try:
+                    self._stop_zoom(settings)
+                except Exception:
+                    pass
+                raise
 
     @staticmethod
     def configured(settings: Settings) -> bool:
@@ -348,17 +514,34 @@ class OnvifControl:
     def status(self) -> dict:
         settings = get_effective_settings()
         configured = self.configured(settings)
+        response = {"configured": configured, "supported": False, "focus_supported": False,
+                    "absolute_zoom_supported": False, "calibrated": False,
+                    "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None}
         if not configured:
-            return {"configured": False, "supported": False, "error": "未配置 ONVIF PTZ 服务及媒体 Profile Token"}
+            response.update(error="未配置 ONVIF PTZ 服务及媒体 Profile Token", zoom_error="光学循环录制尚未配置摄像头")
+            return response
         try:
-            self._request(settings, self.PTZ, "GetStatus", f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
+            status = self._request(settings, self.PTZ, "GetStatus", f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
             nodes = self._request(settings, self.PTZ, "GetNodes", "")
             zoom_supported = nodes.find(".//{http://www.onvif.org/ver10/schema}ContinuousZoomVelocitySpace") is not None
-            return {"configured": True, "supported": zoom_supported,
-                    "focus_supported": bool(settings.camera_onvif_imaging_url and settings.camera_onvif_source_token),
-                    "error": None if zoom_supported else "该设备未声明 ONVIF 连续光学变焦能力"}
+            response.update(supported=zoom_supported,
+                focus_supported=bool(settings.camera_onvif_imaging_url and settings.camera_onvif_source_token),
+                error=None if zoom_supported else "该设备未声明 ONVIF 连续光学变焦能力")
+            try:
+                options = self._zoom_options(settings)
+                response["absolute_zoom_supported"] = True
+                calibration = self._calibration(settings)
+                self._validate_positions(calibration, options)
+                _, _, reported_space = self._parse_zoom_status(status)
+                if reported_space and reported_space != options["space"]:
+                    raise ValueError("摄像头状态使用了不同的变焦坐标空间，无法核对倍率")
+                response.update(calibrated=True, magnifications=sorted(calibration), cycle_supported=True)
+            except Exception as exc:
+                response["zoom_error"] = safe_camera_error(exc, settings)
+            return response
         except Exception as exc:
-            return {"configured": True, "supported": False, "error": safe_camera_error(exc, settings)}
+            response.update(error=safe_camera_error(exc, settings), zoom_error=safe_camera_error(exc, settings))
+            return response
 
     def command(self, action: str) -> dict:
         settings = get_effective_settings()
@@ -366,6 +549,8 @@ class OnvifControl:
             raise ValueError("摄像头光学控制尚未配置；请配置 ONVIF PTZ 服务和媒体 Profile Token")
         profile = f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>"
         source = f"<t:VideoSourceToken>{escape(settings.camera_onvif_source_token)}</t:VideoSourceToken>"
+        if action == "stop":
+            self.cancel_move()
         with self.lock:
             if action in {"zoom_in", "zoom_out"}:
                 velocity = .35 if action == "zoom_in" else -.35

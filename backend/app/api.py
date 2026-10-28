@@ -393,6 +393,7 @@ class _LocalPlayback:
 
 local_playback = _LocalPlayback()
 camera_capture = CameraCapture(hub.broadcast, _live_frame)
+recording_manager.set_zoom_controller(onvif_control)
 _source_lock = threading.RLock()
 
 
@@ -401,6 +402,8 @@ async def shutdown_realtime() -> None:
     camera_capture.stop()
     await asyncio.gather(asyncio.to_thread(local_playback.join), asyncio.to_thread(camera_capture.join))
     await asyncio.to_thread(recording_manager.finish, reason="service_shutdown")
+    timeout = get_effective_settings().camera_onvif_zoom_timeout * 2 + 5
+    await asyncio.to_thread(recording_manager.wait_for_optical_stop, timeout=timeout)
 
 
 class CameraStartRequest(BaseModel):
@@ -442,6 +445,11 @@ def camera_ptz_status():
 @router.post("/api/camera/ptz", tags=["realtime"])
 def control_camera(body: PtzRequest):
     try:
+        if recording_manager.optical_control_busy():
+            if body.action != "stop":
+                raise ValueError("光学循环录制正在控制镜头，请先关闭录制或停止采集后再手动操作")
+            onvif_control.cancel_move()
+            recording_manager.fail("操作员停止镜头动作，光学录制循环已暂停")
         return onvif_control.command(body.action)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

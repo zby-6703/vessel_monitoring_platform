@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 import time
+import threading
 
 import cv2
 from fastapi.testclient import TestClient
@@ -54,6 +55,12 @@ class FrameRecorder:
 
     def get_settings(self):
         return {"enabled": False}
+
+    def set_zoom_controller(self, _controller):
+        pass
+
+    def zoom_observation_context(self):
+        return {"generation": 0, "phase": "overview", "accept_detections": True}
 
     def finish(self, reason):
         self.finishes.append(reason)
@@ -145,6 +152,67 @@ def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path):
     assert all(item["fps"] == 12 for item in recorder.frames)
     assert worker.snapshot()["status"] == "stopped"
     assert settings.live_capture_url not in str(worker.snapshot())
+
+
+def test_camera_pairs_detection_with_context_from_before_capture_and_lens_transition(monkeypatch, tmp_path):
+    settings = replace(get_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://camera/stream")
+    first_inferred = threading.Event()
+    contexts = []
+
+    class Recorder(FrameRecorder):
+        generation = 0
+
+        def zoom_observation_context(self):
+            return {"generation": self.generation, "phase": "overview", "accept_detections": True}
+
+        def process_frame(self, image, **kwargs):
+            super().process_frame(image, **kwargs)
+            self.generation += 1
+
+    recorder = Recorder()
+
+    async def broadcast(_message):
+        pass
+
+    worker = live_capture.CameraCapture(broadcast, api._live_frame)
+
+    class Camera:
+        index = 0
+        def open(self, *_): return True
+        def get(self, *_): return 10
+        def release(self): pass
+        def read(self):
+            self.index += 1
+            if self.index == 2:
+                assert first_inferred.wait(1)
+            elif self.index > 2:
+                worker.stop_event.set()
+                return False, None
+            return True, np.zeros((48, 64, 3), dtype=np.uint8)
+
+    def infer(_service, _settings, _session, frames, detections, _loop):
+        _, _, _, context = frames.get(timeout=1)
+        contexts.append(context)
+        detections.put_nowait(([], context))
+        first_inferred.set()
+        worker.stop_event.wait(1)
+
+    monkeypatch.setattr(live_capture, "get_effective_settings", lambda: settings)
+    monkeypatch.setattr(live_capture, "ModelRegistry", FakeModels)
+    monkeypatch.setattr(live_capture, "FrameInferenceService", EmptyInference)
+    monkeypatch.setattr(live_capture.cv2, "VideoCapture", Camera)
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(worker, "_infer_loop", infer)
+
+    async def run():
+        worker.start(asyncio.get_running_loop(), frame_step=1)
+        await asyncio.to_thread(worker.join)
+
+    asyncio.run(run())
+    assert contexts[0]["generation"] == 0
+    assert recorder.frames[1]["observation_context"]["generation"] == 0
+    assert recorder.frames[1]["vessels"] == []
+    assert all(item["source_type"] == "camera" for item in recorder.frames)
 
 
 def test_live_sources_are_exclusive_and_unconfigured_hardware_is_honest(monkeypatch):

@@ -59,6 +59,9 @@ const latestStages = computed(() => {
   return [...new Set((latestVessel.value?.boxes || []).map((box: any) => labels[box.type]).filter(Boolean))]
 })
 const monitorName = computed(() => sourceMode.value === 'local' ? localPlayback.value?.filename || '本地视频验证' : stream.value?.name || '现场摄像头')
+const opticalMode = computed(() => settings.value.recording_mode === 'optical_cycle')
+const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && ptz.value.magnifications?.some((factor) => Math.abs(factor - settings.value.zoom_factor) < .001)))
+const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
 const sourceError = computed(() => sourceMode.value === 'local' ? localPlayback.value?.error : camera.value?.error)
 const levelLabel = (level: string) => ({ normal: '正常', warning: '关注', critical: '超载', unknown: '待判定' }[level] || level)
 const modelNames: Record<string, string> = { ship_detection: '船舶/吃水区域/船名检测', draft_multitask: '吃水多任务', ship_name_recognition: '船名识别' }
@@ -97,16 +100,23 @@ async function refreshCapture() {
 }
 async function loadSettings() {
   const [result, ptzResult] = await Promise.allSettled([getRecordingSettings(), getPtzStatus()])
-  if (result.status === 'fulfilled') { settings.value = { ...result.value }; savedSettings.value = { ...result.value } }
+  if (result.status === 'fulfilled') { settings.value = { ...defaultRecordingSettings(), ...result.value }; savedSettings.value = { ...settings.value } }
   else ElMessage.error('自动录制设置加载失败，请刷新重试')
   if (ptzResult.status === 'fulfilled') ptz.value = ptzResult.value
 }
+async function refreshPtz() {
+  ptzBusy.value = true
+  try { ptz.value = await getPtzStatus() }
+  catch (error) { ElMessage.error(apiError(error, '镜头能力检查失败')) }
+  finally { ptzBusy.value = false }
+}
 async function saveSettings() {
+  if (opticalMode.value && settings.value.enabled && !opticalReady.value) { ElMessage.error('请先确认绝对光学变焦能力，并选择已标定的目标倍率'); return }
   savingSettings.value = true
   try {
     const result = await updateRecordingSettings(settings.value)
     settings.value = { ...result }; savedSettings.value = { ...result }
-    await refreshCapture(); ElMessage.success(result.enabled ? '自动录制与聚焦设置已生效' : '自动录制已关闭，聚焦设置已保存')
+    await refreshCapture(); ElMessage.success(result.enabled ? result.recording_mode === 'optical_cycle' ? '光学变焦循环策略已生效' : '数字取景录制设置已生效' : '自动录制已关闭，设置已保存')
   } catch (error) { ElMessage.error(apiError(error, '录制设置保存失败')) } finally { savingSettings.value = false }
 }
 function resetSettings() { if (savedSettings.value) settings.value = { ...savedSettings.value } }
@@ -174,7 +184,7 @@ async function chooseLocalVideo(event: Event) {
   sourceBusy.value = true; localFrame.value = null; localOverlay.value = null; localUploadProgress.value = 0; sourceMode.value = 'local'
   try {
     localPlayback.value = await startLocalPlayback(form, (percent) => { localUploadProgress.value = percent })
-    cameraFrame.value = null; cameraOverlay.value = null; await refreshCapture(); ElMessage.success('本地视频已开始实时推理，可验证自动录制')
+    cameraFrame.value = null; cameraOverlay.value = null; await refreshCapture(); ElMessage.success(opticalMode.value ? '本地视频已开始检测验证，不会驱动摄像头光学变焦' : '本地视频已开始实时推理，可验证数字录制')
   } catch (error) { ElMessage.error(apiError(error, '本地视频启动失败')) }
   finally { sourceBusy.value = false; (event.target as HTMLInputElement).value = '' }
 }
@@ -216,20 +226,20 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
           <input ref="videoInput" hidden type="file" accept="video/*" @change="chooseLocalVideo" />
           <label class="frame-step-setting">每 <el-input-number v-model="liveFrameStep" :min="1" :max="1000" :step="1" :disabled="localActive || cameraActive || sourceBusy" size="small" controls-position="right" /> 帧推理一次</label>
           <template v-if="sourceMode === 'local'"><el-button v-if="localActive" size="small" plain type="danger" :loading="sourceBusy" @click="stopLocalVideo"><Square :size="14" />停止回放</el-button><el-button v-else size="small" plain :loading="sourceBusy" @click="videoInput?.click()"><Upload :size="14" />上传视频</el-button><span v-if="sourceBusy && localUploadProgress" class="muted-text">上传 {{ localUploadProgress }}%</span></template>
-          <el-button v-else size="small" :type="cameraActive ? 'danger' : 'primary'" :plain="cameraActive" :disabled="!camera?.configured && !cameraActive" :loading="sourceBusy" @click="toggleCamera"><Square v-if="cameraActive" :size="14" /><RadioTower v-else :size="14" />{{ cameraActive ? '停止采集' : '启动摄像头采集' }}</el-button>
+          <el-button v-else size="small" :type="cameraActive ? 'danger' : 'primary'" :plain="cameraActive" :disabled="!cameraActive && (!camera?.configured || !!savedSettings?.enabled && savedSettings.recording_mode === 'optical_cycle' && !opticalReady)" :loading="sourceBusy" @click="toggleCamera"><Square v-if="cameraActive" :size="14" /><RadioTower v-else :size="14" />{{ cameraActive ? '停止采集' : '启动摄像头采集' }}</el-button>
         </div>
         <div v-if="sourceError" class="source-error" role="alert">{{ sourceError }}</div>
-        <VideoMonitor v-if="monitorConfigured" :src="monitorSrc" :frame-image="frameImage" :overlay="liveFrame" :camera-id="monitorCameraId" :configured="Boolean(frameImage || monitorSrc)" :loading="sourceMode === 'local' ? localActive && !localFrame : cameraActive && !cameraFrame" :focus-settings="savedSettings ? settings : undefined" :recording="recordingStatus?.state === 'recording' && recordingStatus?.source_name === (sourceMode === 'local' ? localPlayback?.filename : camera?.filename)" @focus-center="setFocusCenter" />
+        <VideoMonitor v-if="monitorConfigured" :src="monitorSrc" :frame-image="frameImage" :overlay="liveFrame" :camera-id="monitorCameraId" :configured="Boolean(frameImage || monitorSrc)" :loading="sourceMode === 'local' ? localActive && !localFrame : cameraActive && !cameraFrame" :focus-settings="monitorFocusSettings" :recording-status="sourceMode === 'camera' ? recordingStatus : null" :recording="recordingStatus?.state === 'recording' && recordingStatus?.source_name === (sourceMode === 'local' ? localPlayback?.filename : camera?.filename)" @focus-center="setFocusCenter" />
         <div v-else class="stream-empty">
           <RadioTower :size="36" />
           <strong>{{ sourceMode === 'local' ? '上传一段视频，验证船来即录' : camera?.configured ? '摄像头已配置，等待启动采集' : '等待接入现场摄像头' }}</strong>
-          <span>{{ sourceMode === 'local' ? '使用真实船舶视频验证检测、自动聚焦、预录与通行归档。上传视频会切换当前采集源。' : camera?.configured ? '启动采集后即可进行实时识别；开启右侧录制策略后，仅保留有船经过的视频。' : '在系统配置 LIVE_CAPTURE_URL 接入视频采集源。也可先使用本地视频完整验证录制流程。' }}</span>
+          <span>{{ sourceMode === 'local' ? '本地视频用于检测与数字录制验证；真实光学变焦循环需要接入摄像头。' : camera?.configured ? '启动采集后进行实时识别；光学循环需先确认镜头绝对变焦能力与倍率标定。' : '在服务端配置 LIVE_CAPTURE_URL 接入摄像头，并配置 ONVIF 光学倍率标定。' }}</span>
           <RouterLink v-if="sourceMode === 'camera'" to="/system">查看系统配置</RouterLink>
         </div>
-        <div class="monitor-footnote"><span>全景保留完整证据</span><span>特写覆盖船体 · 船名 · 吃水</span><span>原始画面越清晰，放大效果越好</span></div>
+        <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">

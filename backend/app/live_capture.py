@@ -114,7 +114,7 @@ class CameraCapture:
             recording_manager.set_zoom_controller(onvif_control)
             config = recording_manager.get_settings()
             if config.get("enabled") and config.get("recording_mode") == "optical_cycle":
-                onvif_control.validate_cycle(config["zoom_factor"])
+                recording_manager.validate_optical_settings()
             self.stop_event.clear()
             self._inference_error = None
             self._status.update(status="starting", session_id=uuid.uuid4().hex,
@@ -331,6 +331,9 @@ class OnvifControl:
 
     def cancel_move(self) -> None:
         self._cancel_move.set()
+
+    def available_magnifications(self) -> list[float]:
+        return sorted(self._calibration(get_effective_settings()))
 
     @staticmethod
     def _calibration(settings: Settings) -> dict[float, float]:

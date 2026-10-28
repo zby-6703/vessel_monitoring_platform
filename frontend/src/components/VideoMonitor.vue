@@ -17,6 +17,8 @@ const sourceSize = ref({ width: 16, height: 9 })
 const focused = ref(false)
 const mediaError = ref(false)
 const optical = computed(() => props.focusSettings?.recording_mode === 'optical_cycle')
+const selectedTarget = computed(() => props.recordingStatus?.locked_target || props.recordingStatus?.adaptive_selection?.selected || null)
+const stationaryCount = computed(() => props.recordingStatus?.adaptive_selection?.targets.filter((target) => target.motion_state === 'stationary').length || 0)
 let player: mpegts.Player | null = null
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(value, high))
 const dimensions = computed(() => props.overlay?.source_width && props.overlay?.source_height ? { width: props.overlay.source_width, height: props.overlay.source_height } : sourceSize.value)
@@ -96,6 +98,7 @@ onBeforeUnmount(() => { player?.destroy() })
     <div class="camera-badge"><span class="status-dot" :class="configured ? 'online' : 'offline'"></span>{{ cameraId }}<b v-if="recording" class="recording-live-indicator">● REC</b></div>
     <div v-if="overlay" class="inference-badge"><ScanLine :size="14" /> {{ inferenceFps?.toFixed(1) }} FPS <span>{{ overlay.processing_ms.toFixed(1) }} ms</span></div>
     <div v-if="optical" class="optical-monitor-state" role="status"><ZoomIn :size="13" /><strong>{{ recordingStatus?.current_zoom_factor == null ? '镜头倍率待确认' : `光学 ${recordingStatus.current_zoom_factor}×` }}</strong><span>{{ recordingStatus?.state === 'disabled' ? '循环未开启' : cyclePhaseLabel(recordingStatus?.phase, recordingStatus?.awaiting_zoomed_target) }}</span></div>
+    <div v-if="optical && (selectedTarget || stationaryCount)" class="optical-selection-badge" role="status"><template v-if="selectedTarget">{{ recordingStatus?.locked_target ? '本轮锁定' : '优先候选' }} · 目标 {{ selectedTarget.target_id }}<template v-if="selectedTarget.height_ratio"> · 1× 船高 {{ (selectedTarget.height_ratio * 100).toFixed(1) }}%</template></template><template v-if="stationaryCount">{{ selectedTarget ? ' · ' : '' }}{{ stationaryCount }} 个静止目标</template></div>
     <div v-else-if="focusSettings" class="focus-view-switch" @click.stop>
       <button :class="{ active: !focused }" @click="focused = false">全景</button><button :class="{ active: focused }" @click="focused = true"><ZoomIn :size="13" />聚焦 {{ (1 / crop.width).toFixed(1) }}×</button>
     </div>

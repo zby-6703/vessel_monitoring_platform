@@ -58,6 +58,22 @@ class CycleHarness:
         self.timestamp += advance
         if context is None and vessels is not None:
             context = dict(self.manager.zoom_observation_context())
+        if vessels is not None:
+            # Synthetic detections start in the 1x plane. A physical lens
+            # magnifies them and clips boxes at the current field-of-view edge.
+            zoom = self.manager.current_zoom_factor or 1
+            projected = []
+            for vessel in vessels:
+                boxes = []
+                for box in vessel["boxes"]:
+                    x, y, width, height = box["xywh"]
+                    x1, y1 = max(0, (x / 64 - .5) * zoom + .5), max(0, (y / 48 - .5) * zoom + .5)
+                    x2, y2 = min(1, ((x + width) / 64 - .5) * zoom + .5), min(1, ((y + height) / 48 - .5) * zoom + .5)
+                    if x2 > x1 and y2 > y1:
+                        boxes.append({**box, "xywh": [x1 * 64, y1 * 48, (x2 - x1) * 64, (y2 - y1) * 48]})
+                if boxes:
+                    projected.append({**vessel, "boxes": boxes})
+            vessels = projected
         self.manager.process_frame(
             np.full((48, 64, 3), int(self.timestamp * 10) % 255, dtype=np.uint8),
             camera_id="optical-camera", session_id="optical-session", source_name="现场摄像头",
@@ -157,6 +173,7 @@ def cycle_factory(tmp_path, monkeypatch):
             monkeypatch.setattr(manager, "_encode", finalize)
         manager.update_settings({
             "recording_mode": "optical_cycle", "enabled": True,
+            "adaptive_zoom_enabled": False, "suppress_stationary": False,
             "zoom_factor": 3, "min_hits": 1, "pre_roll_seconds": 0,
             "departure_confirm_seconds": .3, "overview_settle_seconds": 0,
             "zoom_settle_timeout_seconds": 3, **settings,

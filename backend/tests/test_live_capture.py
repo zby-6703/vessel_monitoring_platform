@@ -69,6 +69,13 @@ class FrameRecorder:
         raise AssertionError(f"unexpected capture failure: {error}")
 
 
+def test_vfr_replay_uses_decoded_pts_and_only_falls_back_when_clock_is_unusable():
+    assert api._video_timestamp(1040, 12, 24.5, .43) == pytest.approx(1.04)
+    assert api._video_timestamp(1050, 13, 24.5, 1.04) == pytest.approx(1.05)
+    assert api._video_timestamp(float("nan"), 14, 25, 1.05) == pytest.approx(1.09)
+    assert api._video_timestamp(0, 15, 25, 1.09) == pytest.approx(1.13)
+
+
 def test_local_video_records_skipped_inference_frames_at_source_fps(monkeypatch, tmp_path):
     source = tmp_path / "source.mp4"
     writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 6, (64, 48))
@@ -92,7 +99,7 @@ def test_local_video_records_skipped_inference_frames_at_source_fps(monkeypatch,
     asyncio.run(run())
     assert worker.snapshot()["status"] == "completed"
     assert len(recorder.frames) == 12
-    assert [item["timestamp"] for item in recorder.frames] == [index / 6 for index in range(12)]
+    assert [item["timestamp"] for item in recorder.frames] == pytest.approx([index / 6 for index in range(12)])
     assert all(item["fps"] == 6 and item["source_name"] == "original.mp4" for item in recorder.frames)
     assert [index for index, item in enumerate(recorder.frames) if item["vessels"] is not None] == [0, 4, 8]
     assert recorder.finishes == ["source_completed"]

@@ -9,6 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import time
 
+from .vessel_selection import VesselTargetSelector
+from .scene_motion import BackgroundMotionEstimator
+
 
 class OpticalCycleMixin:
     def _initialize_optical_cycle(self):
@@ -30,6 +33,15 @@ class OpticalCycleMixin:
         self.phase = "overview"
         self.current_zoom_factor = None
         self.cycle_count = 0
+        self.target_selector = VesselTargetSelector()
+        self.background_motion = BackgroundMotionEstimator()
+        self.adaptive_selection = dict(self.target_selector.result)
+        self.locked_target = None
+        self._pending_target_id = None
+        self._active_zoom_factor = None
+        self._last_zoom_adjust = None
+        self._locked_appearance = None
+        self._initial_target_height = None
 
     def set_zoom_controller(self, controller):
         with self.lock:
@@ -42,7 +54,25 @@ class OpticalCycleMixin:
     def zoom_observation_context(self) -> dict:
         with self.lock:
             return {"generation": self._cycle_generation, "phase": self.phase,
-                    "accept_detections": self.phase in {"overview", "zoomed"} and not self._cycle_halt}
+                    "accept_detections": self.phase in {"overview", "zoomed"} and not self._cycle_halt,
+                    "zoom_factor": self.current_zoom_factor}
+
+    def available_magnifications(self):
+        getter = getattr(self.zoom_controller, "available_magnifications", None)
+        return getter() if getter else [1., self.settings.zoom_factor]
+
+    def _validate_zoom_policy(self, settings):
+        if settings.adaptive_zoom_enabled:
+            factors = [factor for factor in self.available_magnifications() if settings.min_optical_zoom <= factor <= settings.max_optical_zoom]
+            if not factors:
+                raise ValueError("自适应范围内没有已标定光学倍率，请先完成倍率标定或调整范围")
+            self.zoom_controller.validate_cycle(min(factors))
+        else:
+            self.zoom_controller.validate_cycle(settings.zoom_factor)
+
+    def validate_optical_settings(self):
+        with self.lock:
+            self._validate_zoom_policy(self.settings)
 
     def _phase(self, phase):
         self.phase = phase
@@ -77,6 +107,7 @@ class OpticalCycleMixin:
             if future is not self._control_future:
                 return
             target = self._control_target
+            command_phase = self.phase
             self._control_future = None
             if session_id != self.session_id:
                 # A previous camera's return must never close a new local or
@@ -103,7 +134,12 @@ class OpticalCycleMixin:
                 return
             self.current_zoom_factor = target
             self._zoom_event(target, True)
-            if target == 1:
+            if command_phase == "zooming_in" and not self._cycle_halt:
+                # Adaptive scheduling can deliberately record at 1x when the
+                # hull is already large or higher calibrated steps are unsafe.
+                self._active_zoom_factor = target
+                self._phase("zoomed")
+            elif target == 1:
                 if self.active:
                     self.catalog[self.active["id"]]["returned_to_overview"] = True
                 if self._cycle_halt or self._cycle_no_more_frames:
@@ -148,6 +184,14 @@ class OpticalCycleMixin:
         self._cycle_policy = None
         self._cycle_no_more_frames = False
         self.cycle_count = 0
+        self.target_selector = VesselTargetSelector()
+        self.background_motion = BackgroundMotionEstimator()
+        self.adaptive_selection = dict(self.target_selector.result)
+        self.locked_target = None
+        self._pending_target_id = None
+        self._active_zoom_factor = None
+        self._locked_appearance = None
+        self._initial_target_height = None
         self._cycle_generation += 1
         self._phase("overview")
 
@@ -211,6 +255,42 @@ class OpticalCycleMixin:
             if isinstance(track_id, int) and track_id not in item["track_ids"]:
                 item["track_ids"].append(track_id)
 
+    def _consistent_locked_target(self, target):
+        if not self.locked_target or target.get("identity_ambiguous"):
+            return False
+        previous, current = self.locked_target["box"], target["box"]
+        old_y, new_y = (previous[1] + previous[3]) / 2, (current[1] + current[3]) / 2
+        if abs(old_y - new_y) > max(.06, (previous[3] - previous[1]) * .6):
+            return False
+        if target["height_ratio"] < self._initial_target_height * .4:
+            return False
+        appearance = self.target_selector.tracks[target["target_id"]].appearance
+        similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
+        return similarity is None or similarity >= .3
+
+    def _find_locked_target(self):
+        targets = self.adaptive_selection["targets"]
+        direct = next((target for target in targets if self.locked_target and target["target_id"] == self.locked_target["target_id"]), None)
+        if direct and self._consistent_locked_target(direct):
+            return direct
+        # Rebind after tracker ID churn only with a distinctive appearance AND
+        # consistent wide-view geometry. Ambiguous monochrome/occluded targets
+        # are returned to overview instead of handing the lens to another ship.
+        matches = []
+        for target in targets:
+            if target["motion_state"] == "stationary" or not self._consistent_locked_target(target):
+                continue
+            appearance = self.target_selector.tracks[target["target_id"]].appearance
+            similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
+            if similarity is not None and similarity >= .65:
+                matches.append((similarity, target))
+        matches.sort(key=lambda pair: pair[0], reverse=True)
+        if matches and (len(matches) == 1 or matches[0][0] - matches[1][0] >= .15):
+            return matches[0][1]
+        if direct:
+            self._cycle_exit_reason = "target_ambiguous"
+        return None
+
     def _process_optical_frame(self, image, fps, timestamp, vessels, observation_context):
         self.focus = {"x": 0., "y": 0., "width": 1., "height": 1.}
         self._check_zoom_timeout()
@@ -225,7 +305,7 @@ class OpticalCycleMixin:
                 self._phase("error")
                 return
             try:
-                self.zoom_controller.validate_cycle(self.settings.zoom_factor)
+                self._validate_zoom_policy(self.settings)
             except (ValueError, RuntimeError):
                 self.error = "摄像头光学倍率尚未标定或不受支持，请完成 1× 和目标倍率配置"
                 self._phase("error")
@@ -247,6 +327,8 @@ class OpticalCycleMixin:
                     self.cycle_count += 1
                     self._finish(self._cycle_exit_reason)
                 self._cycle_policy = None
+                self.locked_target = None
+                self._pending_target_id = None
                 self._phase("overview")
             # Require a subsequent inference captured after the panorama has
             # settled AND the previous recording was closed.
@@ -262,31 +344,71 @@ class OpticalCycleMixin:
         if not fresh:
             return
         qualified = self._qualify_optical(vessels)
+        actual_zoom = float(self.current_zoom_factor or 1.)
+        background = self.background_motion.update(image, qualified, timestamp, generation=self._cycle_generation)
+        self.adaptive_selection = self.target_selector.update(qualified, image.shape[1], image.shape[0], timestamp, policy,
+            zoom_factor=actual_zoom, calibrated_factors=self.available_magnifications(), camera_motion=background, image=image)
         if self.phase == "overview":
-            self.hits = self.hits + 1 if qualified else 0
+            candidate = self.adaptive_selection["selected"]
+            candidate_id = candidate["target_id"] if candidate else None
+            self.hits = self.hits + 1 if candidate_id is not None and candidate_id == self._pending_target_id else 1 if candidate_id is not None else 0
+            self._pending_target_id = candidate_id
             if self.hits < policy.min_hits:
                 return
             self._clear_buffer()
             self._cycle_policy = self.settings.model_copy(deep=True)
             self._cycle_exit_reason = "vessel_left"
+            self.locked_target = {key: value for key, value in candidate.items() if key not in {"boxes", "vessel", "assets"}}
+            self._active_zoom_factor = self.adaptive_selection["zoom_factor"]
+            self._locked_appearance = self.target_selector.tracks[candidate_id].appearance
+            self._initial_target_height = candidate["height_ratio"]
+            self._last_zoom_adjust = timestamp
             self._start(image, fps, timestamp, single=True)
             item = self.catalog[self.active["id"]]
             item.update(recording_mode="optical_cycle", cycle_index=self.cycle_count + 1,
-                        optical_zoom_factor=policy.zoom_factor, returned_to_overview=False, zoom_events=[])
-            self._record_optical_attributes(qualified)
+                        optical_zoom_factor=self._active_zoom_factor, initial_optical_zoom_factor=self._active_zoom_factor,
+                        returned_to_overview=False, zoom_events=[], target_id=candidate_id,
+                        target_height_ratio=candidate["height_ratio"], selection_reason=self.adaptive_selection["selection_reason"],
+                        adaptive_zoom=policy.adaptive_zoom_enabled, target_decision=dict(self.locked_target))
+            self._record_optical_attributes([candidate])
             self._write_frame(image, timestamp)
             # Open the file and write the triggering full-view frame FIRST.
-            self._command_zoom(policy.zoom_factor, "zooming_in")
+            self._command_zoom(self._active_zoom_factor, "zooming_in")
         else:
-            self._record_optical_attributes(qualified)
-            if qualified:
+            if self._zoomed_since is None:
+                self._zoomed_since = timestamp
+            target = self._find_locked_target()
+            if target:
+                self.locked_target = {**self.locked_target, **target}
+                observed_vessel = self.target_selector.tracks[target["target_id"]].vessel
+                self._record_optical_attributes([observed_vessel])
                 self._zoomed_ship_seen = True
                 self._empty_since = None
+                if policy.suppress_stationary and target["motion_state"] == "stationary":
+                    self._cycle_exit_reason = "target_stationary"
+                    self._command_zoom(1., "zooming_out")
+                    return
+                if policy.adaptive_zoom_enabled and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
+                    plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
+                    next_zoom, current = plan["zoom_factor"], actual_zoom
+                    should_reduce = next_zoom < current and (target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)
+                    should_increase = next_zoom > current and plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis)
+                    if should_reduce or should_increase:
+                        self._last_zoom_adjust = timestamp
+                        self._active_zoom_factor = next_zoom
+                        item = self.catalog[self.active["id"]]
+                        item["optical_zoom_factor"] = next_zoom
+                        item.setdefault("zoom_decisions", []).append({"source_seconds": timestamp, "height_ratio": target["height_ratio"], **plan})
+                        self._command_zoom(next_zoom, "zooming_in")
+                        return
             elif not self._zoomed_ship_seen:
                 # At first detection in the wide view, the bow can still be
                 # outside the narrower zoomed FOV. Wait for it to arrive before
                 # an empty zoomed frame can mean that the stern has departed.
                 self._empty_since = None
+                if timestamp - self._zoomed_since >= policy.target_acquire_timeout_seconds:
+                    self._cycle_exit_reason = "target_not_reacquired"
+                    self._command_zoom(1., "zooming_out")
             elif self._empty_since is None:
                 self._empty_since = timestamp
             elif timestamp - self._empty_since >= policy.departure_confirm_seconds:

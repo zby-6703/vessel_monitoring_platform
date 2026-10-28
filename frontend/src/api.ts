@@ -122,15 +122,55 @@ export interface RecordingSettings {
   departure_confirm_seconds: number
   zoom_settle_timeout_seconds: number
   overview_settle_seconds: number
+  adaptive_zoom_enabled: boolean
+  target_height_ratio: number
+  min_optical_zoom: number
+  max_optical_zoom: number
+  suppress_stationary: boolean
+  stationary_seconds: number
+  stationary_motion_threshold: number
+  motion_confirm_seconds: number
+  target_switch_margin: number
+  zoom_adjust_cooldown_seconds: number
+  zoom_adjust_hysteresis: number
+  target_acquire_timeout_seconds: number
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
   recording_mode: 'optical_cycle', enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 1,
   confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
   retention_days: 30, focus_mode: 'auto', zoom_factor: 3, center_x: .5, center_y: .5, padding: .2,
   departure_confirm_seconds: 1, zoom_settle_timeout_seconds: 15, overview_settle_seconds: .5,
+  adaptive_zoom_enabled: true, target_height_ratio: .55, min_optical_zoom: 1.1, max_optical_zoom: 8,
+  suppress_stationary: true, stationary_seconds: 15, stationary_motion_threshold: .015,
+  motion_confirm_seconds: 1, target_switch_margin: .2,
+  zoom_adjust_cooldown_seconds: 3, zoom_adjust_hysteresis: .15, target_acquire_timeout_seconds: 15,
 })
+export interface AdaptiveTarget {
+  target_id: number | string
+  ship_id?: number
+  ship_name?: string
+  box?: [number, number, number, number]
+  height_ratio?: number
+  motion_state?: 'observing' | 'moving' | 'stationary'
+  stationary_seconds?: number
+  eligible?: boolean
+  reason?: string
+}
+export interface AdaptiveSelection {
+  selected_target_id: number | string | null
+  selected?: AdaptiveTarget | null
+  targets: AdaptiveTarget[]
+  zoom_factor?: number | null
+  requested_zoom_factor?: number | null
+  selection_reason?: string
+  target_selection_reason?: string
+}
+export const targetMotionLabel = (state?: string) => ({ observing: '观测中', moving: '移动船舶', stationary: '停泊已排除' }[state || ''] || '待观测')
+const baseSelectionReasonLabel = (reason?: string) => ({ nearest_moving: '优先选择船框较高的移动目标', nearest: '按船框高度估计近船优先', observing_motion: '正在观察并确认船舶自身位移', stationary_excluded: '持续静止，已排除录制焦点', keep_target_hysteresis: '保留当前候选，避免相近目标来回切换', no_moving_target: '暂无已确认移动的目标，继续观察', adaptive_calibrated: '按船高选择安全的已标定光学档位', fixed_zoom: '采用已设置的固定光学倍率', already_large_enough: '船体已足够大，保留 1× 避免裁掉船体', no_safe_calibrated_zoom: '暂无安全的已标定放大档位，保留全景', off_axis_limited: '受目标竖直位置与视野边界限制，降低放大倍率', uncertain_background: '背景运动补偿尚不明确，暂缓停泊判定', no_eligible_target: '暂无可录制的移动目标', observing: '正在观察位移，暂不抢占录制', stationary: '持续静止，暂不作为录制焦点', no_calibrated_zoom: '设置范围内没有可用的已标定倍率', calibrated_limit: '已按可用标定档位限制倍率', target_locked: '本轮已锁定目标，不随其他船切换', motion_confirming: '正在确认船舶移动', no_vessels: '当前未检测到船体' }[reason || ''] || reason || '等待新的目标观测')
+const additionalSelectionReasons: Record<string, string> = { ambiguous_identity: '多船重叠，身份关联不明确，暂不抢占焦点' }
+export const selectionReasonLabel = (reason?: string) => additionalSelectionReasons[reason || ''] || baseSelectionReasonLabel(reason)
 export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'error'
-export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待船头进入放大视野' : ({ overview: '1× 全景待船', initializing: '正在归位至 1×', zooming_in: '正在光学放大', zoomed: '固定倍率录制船头至船尾', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新检测', error: '光学循环异常' }[phase || 'overview'])
+export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', error: '光学循环异常' }[phase || 'overview'])
 export interface RecordingStatus {
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null
@@ -145,6 +185,8 @@ export interface RecordingStatus {
   cycle_count?: number
   zoom_driver?: 'optical' | 'digital' | null
   awaiting_zoomed_target?: boolean
+  adaptive_selection?: AdaptiveSelection | null
+  locked_target?: AdaptiveTarget | null
   focus: { x: number; y: number; width: number; height: number } | null
 }
 export interface RecordingItem {
@@ -171,6 +213,12 @@ export interface RecordingItem {
   error?: string | null
   zoom_factor?: number
   settings?: Partial<RecordingSettings>
+  target_id?: number | string
+  target_height_ratio?: number
+  selection_reason?: string
+  adaptive_zoom?: boolean
+  requested_zoom_factor?: number
+  zoom_events?: Array<{ source_seconds?: number; factor: number; settled: boolean }>
 }
 export interface CameraStatus {
   status: 'idle' | 'starting' | 'running' | 'stopped' | 'failed'

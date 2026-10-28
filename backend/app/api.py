@@ -238,6 +238,14 @@ def _live_frame(result, camera_id: str, current_by_track: dict[int, dict]) -> di
     return {"frame_timestamp": result.observed_at.isoformat(), "frame_id": result.frame_index or 0, "camera_id": camera_id, "source_width": result.image_width, "source_height": result.image_height, "processing_ms": result.processing_ms, "vessels": vessels}
 
 
+def _video_timestamp(position_msec: float, frame_index: int, fps: float, previous: float | None) -> float:
+    """Prefer decoded PTS: nominal/average FPS cannot time a VFR source."""
+    decoded = position_msec / 1000
+    if math.isfinite(decoded) and decoded >= 0 and (previous is None or decoded > previous):
+        return decoded
+    return frame_index / fps if previous is None else previous + 1 / fps
+
+
 class _LocalPlayback:
     """Upload a local video and publish the same live-frame payload as a camera."""
     def __init__(self) -> None:
@@ -311,13 +319,15 @@ class _LocalPlayback:
             tracker = TrackTrackTracker(det_thresh=.45, init_thresh=.45, match_thresh=.8, max_time_lost=30, min_len=1, min_box_area=800, class_agnostic=True)
             aggregator = InstanceAggregator(storage.task_id, source_name, settings.track_confirm_hits, settings.track_lost_seconds, settings.track_finish_seconds)
             source_index = processed = 0
+            source_timestamp = None
             while not self.stop_event.is_set():
                 ok, image = capture.read()
                 if not ok:
                     break
+                source_timestamp = _video_timestamp(float(capture.get(cv2.CAP_PROP_POS_MSEC)), source_index, fps, source_timestamp)
                 if source_index % step:
                     recording_manager.process_frame(image, camera_id=str(camera_id), session_id=str(session_id),
-                        source_name=source_name, fps=fps, timestamp=source_index / fps, vessels=None)
+                        source_name=source_name, fps=fps, timestamp=source_timestamp, vessels=None)
                     source_index += 1
                     continue
                 result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.FULL_PIPELINE, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
@@ -335,7 +345,7 @@ class _LocalPlayback:
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
                 live = _live_frame(result, str(camera_id), current)
                 recording_manager.process_frame(image, camera_id=str(camera_id), session_id=str(session_id),
-                    source_name=source_name, fps=fps, timestamp=source_index / fps, vessels=live["vessels"])
+                    source_name=source_name, fps=fps, timestamp=source_timestamp, vessels=live["vessels"])
                 repository.save_realtime_frame(result, str(session_id), "local_video", source_name, str(camera_id), result_uri)
                 for track_id in active_ids:
                     repository.save_realtime_instance(aggregator.snapshot(track_id, result.observed_at), str(session_id), "local_video", str(camera_id), result_uri)

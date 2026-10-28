@@ -393,6 +393,9 @@ img { display: block; max-width: 100%; }
 }
 
 /* Passage recording: source-aligned preview, controls and video archives. */
+@media (min-width: 1101px) and (min-height: 720px) {
+  .dashboard-page .video-panel { position: sticky; top: 86px; }
+}
 .dashboard-page .monitor-grid { grid-template-columns: minmax(0, 1.85fr) minmax(340px, .85fr); align-items: start; }
 .monitor-source-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 12px 16px 2px; }
 .monitor-source-bar .el-radio-button__inner { display: inline-flex; align-items: center; gap: 6px; }
@@ -558,3 +561,33 @@ img { display: block; max-width: 100%; }
 .optical-monitor-state > span { color: #99adb6; }
 .optical-playback-badge { padding: 7px 9px; color: #b4dbe0 !important; border: 1px solid #3a5c65; background: #182d34; white-space: nowrap; font-size: 10px; }
 @media (max-width: 540px) { .optical-monitor-state { top: 43px; padding: 6px 7px; font-size: 9px; } .optical-monitor-state > span { flex-basis: 100%; } }
+
+/* Adaptive optical selection uses a side panel: canonical boxes are not drawn
+   over a camera view that may already have a different optical field of view. */
+.adaptive-mode-options { margin: 0 0 15px; }
+.adaptive-zoom-range { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 13px; }
+.adaptive-zoom-range label { display: grid; gap: 7px; color: var(--text-secondary); font-size: 10px; }
+.adaptive-zoom-range .el-input-number { width: 100%; }
+.adaptive-target-panel { margin-top: 16px; padding: 13px 11px 0; border: 1px solid var(--border-strong); border-radius: 3px; background: rgb(7 18 23 / 24%); }
+.adaptive-target-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+.adaptive-target-heading strong { font-weight: 500; color: var(--text-secondary); }
+.adaptive-target-heading > span { color: #d6b882; font-size: 9px; }
+.selected-target-facts { display: grid; gap: 5px; margin-bottom: 12px; padding: 9px 10px; border-left: 2px solid var(--primary); background: rgb(33 168 181 / 8%); color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
+.selected-target-facts strong { font-weight: 500; color: #b8eef1; }
+.target-observing-note { color: var(--text-muted); font-size: 10px; line-height: 1.7; margin: 9px 0 13px; }
+.adaptive-target-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.adaptive-target-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 9px 0; border-top: 1px solid var(--border); }
+.adaptive-target-list li > div { min-width: 0; display: grid; gap: 4px; }
+.adaptive-target-list strong { font-size: 10px; font-weight: 400; color: var(--text-secondary); }
+.adaptive-target-list li > div > span { font-size: 9px; color: var(--text-muted); }
+.adaptive-target-list small { color: #ab9a80; font-size: 9px; line-height: 1.5; }
+.adaptive-target-list li.selected strong { color: #a4e4e6; }
+.adaptive-target-list li.parked strong { color: #a9a292; }
+.target-motion-state { flex-shrink: 0; padding: 3px 5px; font-size: 9px; border: 1px solid #455563; border-radius: 2px; color: #a6b7c5; background: #18232c; }
+.target-motion-state.moving { color: #9ed9be; border-color: #416951; background: #192b23; }
+.target-motion-state.stationary { color: #d8ba88; border-color: #6a593c; background: #2a261d; }
+.stationary-policy-toggle { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; font-size: 10px; color: var(--text-secondary); }
+.optical-selection-badge { position: absolute; left: 13px; bottom: 54px; z-index: 6; max-width: calc(100% - 26px); padding: 7px 9px; border: 1px solid #426773; background: rgb(8 20 25 / 88%); color: #b9dce1; font-size: 10px; line-height: 1.5; pointer-events: none; }
+.archive-target-info { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border-strong); background: rgb(33 168 181 / 5%); color: var(--text-secondary); font-size: 11px; line-height: 1.8; }
+.archive-target-info strong { color: #b8eef1; font-weight: 500; }
+@media (max-width: 540px) { .optical-selection-badge { font-size: 9px; bottom: 52px; } .adaptive-target-panel { padding-inline: 10px; } }

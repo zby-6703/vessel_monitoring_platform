@@ -36,6 +36,18 @@ class RecordingSettings(BaseModel):
     departure_confirm_seconds: float = Field(default=1, ge=.3, le=10)
     zoom_settle_timeout_seconds: float = Field(default=15, ge=3, le=60)
     overview_settle_seconds: float = Field(default=.5, ge=0, le=5)
+    adaptive_zoom_enabled: bool = True
+    target_height_ratio: float = Field(default=.55, ge=.15, le=.9)
+    min_optical_zoom: float = Field(default=1.1, ge=1.1, le=40)
+    max_optical_zoom: float = Field(default=8, ge=1.1, le=40)
+    suppress_stationary: bool = True
+    stationary_seconds: float = Field(default=15, ge=3, le=600)
+    stationary_motion_threshold: float = Field(default=.015, ge=.002, le=.1)
+    motion_confirm_seconds: float = Field(default=1, ge=.2, le=10)
+    target_switch_margin: float = Field(default=.2, ge=0, le=1)
+    zoom_adjust_cooldown_seconds: float = Field(default=3, ge=1, le=30)
+    zoom_adjust_hysteresis: float = Field(default=.15, ge=.05, le=.5)
+    target_acquire_timeout_seconds: float = Field(default=15, ge=3, le=120)
     pre_roll_seconds: float = Field(default=3, ge=0, le=20)
     post_roll_seconds: float = Field(default=5, ge=1, le=60)
     min_hits: int = Field(default=1, ge=1, le=20)
@@ -51,6 +63,8 @@ class RecordingSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_roll(self):
+        if self.min_optical_zoom > self.max_optical_zoom:
+            raise ValueError("最小光学倍率不能大于最大倍率")
         if self.recording_mode == "optical_cycle" and self.zoom_factor <= 1:
             raise ValueError("光学循环的目标倍率必须大于 1×")
         if self.recording_mode == "passage" and self.zoom_factor > 8:
@@ -189,7 +203,7 @@ class RecordingManager(OpticalCycleMixin):
             if settings.enabled and not shutil.which("ffmpeg"):
                 raise ValueError("启用录制需要服务端安装 ffmpeg（含 libx264 编码器）")
             if settings.enabled and settings.recording_mode == "optical_cycle" and self.zoom_controller is not None:
-                self.zoom_controller.validate_cycle(settings.zoom_factor)
+                self._validate_zoom_policy(settings)
             _atomic_json(self.settings_path, settings.model_dump())
             if not settings.enabled:
                 if self._optical_session:
@@ -479,9 +493,10 @@ class RecordingManager(OpticalCycleMixin):
                     "active_id": self.active["id"] if self.active else None,
                     "buffer_seconds": round(self.buffer[-1][0] - self.buffer[0][0], 2) if len(self.buffer) > 1 else 0,
                     "error": self.error, "source_name": self.source_name, "storage_bytes": self._storage_bytes(), "zoom_capability": "optical" if self._optical_session else "digital", "focus": self.focus,
-                    "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": (self._cycle_policy or self.settings).zoom_factor,
+                    "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
-                    "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen}
+                    "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
+                    "adaptive_selection": self.adaptive_selection, "locked_target": self.locked_target}
 
     def _public_item(self, item: dict) -> dict:
         value = dict(item)

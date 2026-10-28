@@ -60,7 +60,7 @@ const latestStages = computed(() => {
 })
 const monitorName = computed(() => sourceMode.value === 'local' ? localPlayback.value?.filename || '本地视频验证' : stream.value?.name || '现场摄像头')
 const opticalMode = computed(() => settings.value.recording_mode === 'optical_cycle')
-const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && ptz.value.magnifications?.some((factor) => Math.abs(factor - settings.value.zoom_factor) < .001)))
+const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && ptz.value.magnifications?.some((factor) => factor > 1 && (settings.value.adaptive_zoom_enabled ? factor >= settings.value.min_optical_zoom && factor <= settings.value.max_optical_zoom : Math.abs(factor - settings.value.zoom_factor) < .001))))
 const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
 const sourceError = computed(() => sourceMode.value === 'local' ? localPlayback.value?.error : camera.value?.error)
 const levelLabel = (level: string) => ({ normal: '正常', warning: '关注', critical: '超载', unknown: '待判定' }[level] || level)
@@ -111,7 +111,7 @@ async function refreshPtz() {
   finally { ptzBusy.value = false }
 }
 async function saveSettings() {
-  if (opticalMode.value && settings.value.enabled && !opticalReady.value) { ElMessage.error('请先确认绝对光学变焦能力，并选择已标定的目标倍率'); return }
+  if (opticalMode.value && settings.value.enabled && !opticalReady.value) { ElMessage.error(settings.value.adaptive_zoom_enabled ? '请先确认光学变焦能力，并在倍率范围内配置至少一个已标定档位' : '请先确认绝对光学变焦能力，并选择已标定的目标倍率'); return }
   savingSettings.value = true
   try {
     const result = await updateRecordingSettings(settings.value)

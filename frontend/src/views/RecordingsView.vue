@@ -2,7 +2,7 @@
 import { Download, Film, Play, RefreshCw, Search, Trash2, Video, X } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiError, deleteRecording, formatBytes, getRecordings, type RecordingItem } from '../api'
+import { apiError, deleteRecording, formatBytes, getRecordings, selectionReasonLabel, type RecordingItem } from '../api'
 const filters = reactive({ query: '', camera_id: '', dates: [] as string[] })
 const recordings = ref<RecordingItem[]>([])
 const total = ref(0)
@@ -20,10 +20,11 @@ let loadingNow = false
 const isOptical = (item: RecordingItem) => (item.recording_mode || item.settings?.recording_mode) === 'optical_cycle'
 const originalUrl = (item: RecordingItem) => item.cycle_url || item.original_url
 const magnification = (item: RecordingItem) => item.optical_zoom_factor || item.zoom_factor || item.settings?.zoom_factor
+const zoomTrail = (item: RecordingItem) => (item.zoom_events || []).filter((event) => event.settled).map((event) => event.factor).filter((factor, index, factors) => index === 0 || factor !== factors[index - 1]).map((factor) => `${factor}×`).join(' → ')
 const videoUrl = computed(() => selected.value ? activeView.value === 'focused' && !isOptical(selected.value) ? selected.value.focused_url : originalUrl(selected.value) : null)
 const pendingCount = computed(() => recordings.value.filter((item) => ['recording', 'processing'].includes(item.status)).length)
 const statusLabel = (status: string) => ({ completed: '已归档', interrupted: '已中断', failed: '失败', recording: '录制中', processing: '转码中' }[status] || status)
-const reasonLabel = (reason: string | null, optical = false) => ({ source_completed: '视频源结束', source_stopped: '采集已停止', source_error: '视频源异常', source_changed: '切换视频源', source_discontinuity: '视频源时间中断', resolution_changed: '视频分辨率变化', max_duration: '达到分段时长', vessel_left: optical ? '船尾离场，已回到 1×' : '船舶离开画面', cycle_completed: '本轮完成，已回到 1×', cycle_timeout: '单轮超时保护', zoom_failed: '镜头变焦失败', zoom_timeout: '镜头到位超时', disabled: '录制已关闭', settings_changed: '策略已更新', process_restarted: '服务重启恢复', server_shutdown: '服务关闭', storage_limit: '存储容量限制', writer_failed: '录像写入失败' }[reason || ''] || '自动归档')
+const reasonLabel = (reason: string | null, optical = false) => ({ source_completed: '视频源结束', source_stopped: '采集已停止', source_error: '视频源异常', source_changed: '切换视频源', source_discontinuity: '视频源时间中断', resolution_changed: '视频分辨率变化', max_duration: '达到分段时长', vessel_left: optical ? '目标船尾离场，已回到 1×' : '船舶离开画面', target_left: '锁定目标离场，已回到 1×', target_lost: '目标重识别未确认', target_not_reacquired: '锁定目标重识别超时，已回到全景', target_stationary: '目标持续静止，结束本轮', target_ambiguous: '多船重识别不明确，结束本轮', cycle_completed: '本轮完成，已回到 1×', cycle_timeout: '单轮超时保护', zoom_failed: '镜头变焦失败', zoom_timeout: '镜头到位超时', disabled: '录制已关闭', settings_changed: '策略已更新', process_restarted: '服务重启恢复', server_shutdown: '服务关闭', storage_limit: '存储容量限制', writer_failed: '录像写入失败' }[reason || ''] || '自动归档')
 const dateLabel = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const durationLabel = (value: number) => `${Math.floor(value / 60).toString().padStart(2, '0')}:${Math.floor(value % 60).toString().padStart(2, '0')}`
 const downloadUrl = (url: string | null) => url ? `${url}${url.includes('?') ? '&' : '?'}download=true` : ''
@@ -94,7 +95,9 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
         <video v-if="videoUrl" :key="videoUrl" ref="playback" class="archive-player" :src="videoUrl" :poster="selected.thumbnail_url || undefined" controls playsinline preload="metadata" @loadedmetadata="restorePlayback"></video>
         <div v-else class="archive-player-empty"><Film :size="30" /><span>{{ selected.status === 'processing' ? '视频正在转码，完成后自动更新' : selected.status === 'recording' ? '录制进行中，离场归档后可回看' : '这段视频暂不可播放' }}</span></div>
         <div class="recording-playback-facts"><div><span>录像时长</span><strong>{{ durationLabel(selected.duration_seconds) }}</strong></div><div><span>摄像头</span><strong>{{ selected.camera_id }}</strong></div><div><span>{{ isOptical(selected) ? '光学倍率 / 循环' : '轨迹 ID' }}</span><strong>{{ isOptical(selected) ? `${magnification(selected) || '--'}× · ${selected.cycle_index ? `第 ${selected.cycle_index} 轮` : '独立录像'}` : selected.track_ids.join(', ') || '--' }}</strong></div><div><span>归档状态</span><strong>{{ statusLabel(selected.status) }} · {{ reasonLabel(selected.reason, isOptical(selected)) }}</strong></div></div>
-        <p class="setting-hint">{{ isOptical(selected) ? '本视频包含检测触发后的放大、船舶经过及镜头缩回过程。正常轮次确认回到 1× 后结束；异常中断会保留已拍摄画面并标明原因。' : '全景保存采集到的完整画面，数字特写随取景策略裁剪放大。切换视角时保留播放位置。' }}</p>
+        <div v-if="isOptical(selected) && selected.target_id != null" class="archive-target-info"><strong>本轮目标 {{ selected.target_id }}</strong><span v-if="selected.target_height_ratio != null"> · 选船时高度占比 {{ (selected.target_height_ratio * 100).toFixed(1) }}%</span><span> · {{ selected.adaptive_zoom ? '按船高自适应倍率' : '固定倍率' }}</span><span v-if="selected.requested_zoom_factor"> · 计算建议 {{ selected.requested_zoom_factor.toFixed(2) }}×，实际 {{ magnification(selected) || '--' }}×</span><div v-if="selected.selection_reason">{{ selectionReasonLabel(selected.selection_reason) }}</div></div>
+        <p v-if="isOptical(selected) && zoomTrail(selected)" class="setting-hint">已确认镜头倍率：{{ zoomTrail(selected) }}</p>
+        <p class="setting-hint">{{ isOptical(selected) ? '本视频围绕已锁定的一艘目标船录制，背景船或停泊船不会自动延长本轮。正常轮次确认回到 1× 后结束；目标重识别不明确或异常中断时保留已拍摄画面并标明原因。' : '全景保存采集到的完整画面，数字特写随取景策略裁剪放大。切换视角时保留播放位置。' }}</p>
         <p v-if="isOptical(selected) && selected.returned_to_overview === false" class="optical-local-note">本轮结束时未能确认镜头回到 1×，请检查摄像头连接与镜头状态。</p>
         <p v-if="selected.error" class="recording-error" role="alert">{{ selected.error }}</p>
       </div>

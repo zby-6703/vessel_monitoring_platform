@@ -1,0 +1,28 @@
+# 新模型模板：训练入口须为 RGB 0~1，不适用于现有旧权重。
+# 复制到新模型目录并命名为 deploy_config.yaml；尺寸需与 ONNX 一致。
+model_type: shipdet
+onnx_file: model.onnx
+opset: 17
+input:
+  name: images
+  dtype: float32
+  layout: NCHW
+  image_size_wh: [960, 540]  # [W,H]；若网络要求 32 倍数，可同步改为 [960,544]
+  image_format: RGB
+  include_norm_in_model: false
+  pixel_mean: [0.0, 0.0, 0.0]
+  pixel_std: [255.0, 255.0, 255.0]
+  pad_value: 0
+output:
+  names: [pred_logits, pred_boxes]  # 说明字段；图中实际输出顺序必须相同
+  box_format: cxcywh_normalized
+class_names: [ship, waterlineArea, name]
+class_id_to_name:
+  0: ship
+  1: waterlineArea
+  2: name
+num_classes: 3
+postprocess:
+  score_thresh: 0.1
+  topk: 100
+  # 当前适配器不执行 NMS；请由模型/包装层解决重复框，或后续修改后端。

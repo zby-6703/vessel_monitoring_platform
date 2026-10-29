@@ -4,6 +4,8 @@ VesselSight 是一个可独立部署的船舶视频/图像分析平台。它提�
 
 源代码、运行数据和模型权重已分离：克隆本仓库即可构建服务；运行数据和模型权重已发布到 GitHub Releases：[resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0)。在执行真实推理前，只需按 [models/README.md](models/README.md) 放入对应的 ONNX 权重。
 
+训练新模型或从 `.pt` 导出部署模型前，请参阅 [新模型 ONNX 导出与接入要求](docs/onnx-model-contract.md)，其中包含三类检测、字符检测与水体分割的张量接口、预处理、配置模板和验收步骤。
+
 ## 功能范围
 
 - 离线图像和视频分析，支持标注结果、JSONL、CSV 和可视化输出。

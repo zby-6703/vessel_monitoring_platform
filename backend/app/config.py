@@ -59,6 +59,9 @@ class Settings:
     live_capture_url: str = os.getenv("LIVE_CAPTURE_URL", "").strip()
     live_capture_frame_step: int = max(1, int(os.getenv("LIVE_CAPTURE_FRAME_STEP", "3")))
     live_capture_fps: float = max(1.0, min(120.0, float(os.getenv("LIVE_CAPTURE_FPS", "25"))))
+    # Explicit override for cameras whose RTSP metadata reports an incorrect FPS.
+    # Zero leaves the source-reported rate / fallback behavior intact.
+    live_capture_fps_override: float = float(os.getenv("LIVE_CAPTURE_FPS_OVERRIDE", "0"))
     camera_onvif_ptz_url: str = os.getenv("CAMERA_ONVIF_PTZ_URL", "").strip()
     camera_onvif_imaging_url: str = os.getenv("CAMERA_ONVIF_IMAGING_URL", "").strip()
     camera_onvif_profile_token: str = os.getenv("CAMERA_ONVIF_PROFILE_TOKEN", "").strip()

@@ -105,8 +105,10 @@ def test_local_video_records_skipped_inference_frames_at_source_fps(monkeypatch,
     assert recorder.finishes == ["source_completed"]
 
 
-def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path):
-    settings = replace(get_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://user:private@example/stream")
+@pytest.mark.parametrize("reported_fps,override_fps,expected_fps", [(12, 0, 12), (100, 25, 25), (float("nan"), 0, 25)])
+def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path, reported_fps, override_fps, expected_fps):
+    settings = replace(get_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://user:private@example/stream",
+                       live_capture_fps_override=override_fps, live_capture_fps=25)
     recorder = FrameRecorder()
     inference_calls = []
 
@@ -129,7 +131,7 @@ def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path):
             return True
 
         def get(self, _property):
-            return 12
+            return reported_fps
 
         def read(self):
             if self.index == 30:
@@ -156,7 +158,7 @@ def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path):
     asyncio.run(run())
     assert len(recorder.frames) == 30
     assert 1 <= len(inference_calls) < 30
-    assert all(item["fps"] == 12 for item in recorder.frames)
+    assert all(item["fps"] == expected_fps for item in recorder.frames)
     assert worker.snapshot()["status"] == "stopped"
     assert settings.live_capture_url not in str(worker.snapshot())
 
@@ -245,6 +247,30 @@ def test_camera_error_redacts_credentials():
     assert "lens-password" not in message
     assert "other" not in message
     assert "user:" not in message
+
+
+@pytest.mark.parametrize("modes,expected", [(["MANUAL"], False), (["AUTO", "MANUAL"], True)])
+def test_autofocus_requires_the_camera_to_declare_auto_mode(monkeypatch, modes, expected):
+    import xml.etree.ElementTree as ET
+    settings = replace(get_settings(), camera_onvif_ptz_url="http://camera/ptz", camera_onvif_profile_token="real-profile",
+                       camera_onvif_imaging_url="http://camera/imaging", camera_onvif_source_token="real-source")
+    monkeypatch.setattr(live_capture, "get_effective_settings", lambda: settings)
+    controller = live_capture.OnvifControl()
+    requested = []
+
+    def request(_settings, _namespace, action, _body):
+        requested.append(action)
+        return ET.fromstring('<Options>' + ''.join(f'<AutoFocusModes>{mode}</AutoFocusModes>' for mode in modes) + '</Options>')
+
+    monkeypatch.setattr(controller, "_request", request)
+    assert controller._autofocus_supported(settings) is expected
+    if expected:
+        assert controller.command("autofocus")["accepted"] is True
+        assert "SetImagingSettings" in requested
+    else:
+        with pytest.raises(ValueError, match="未声明 ONVIF 自动对焦"):
+            controller.command("autofocus")
+        assert "SetImagingSettings" not in requested
 
 
 @pytest.mark.parametrize("error", ["ship_detector_failed: invalid model output", "frame_inference_failed: broken tensor"])

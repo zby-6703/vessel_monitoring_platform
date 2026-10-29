@@ -230,7 +230,7 @@ export interface CameraStatus {
   error: string | null
 }
 export interface PtzStatus {
-  configured: boolean; supported: boolean; focus_supported?: boolean; error: string | null
+  configured: boolean; supported: boolean; focus_supported?: boolean; autofocus_supported?: boolean; focus_error?: string | null; error: string | null
   absolute_zoom_supported?: boolean; calibrated?: boolean; magnifications?: number[]
   cycle_supported?: boolean; zoom_error?: string | null
 }

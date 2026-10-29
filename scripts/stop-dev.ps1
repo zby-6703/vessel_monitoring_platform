@@ -78,7 +78,12 @@ foreach ($port in @(8010, 5173)) {
     }
 }
 
-$remaining = @(Get-NetTCPConnection -State Listen -LocalPort 8010,5173 -ErrorAction SilentlyContinue)
+$stopDeadline = (Get-Date).AddSeconds(5)
+do {
+    $remaining = @(Get-NetTCPConnection -State Listen -LocalPort 8010,5173 -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 200
+} until ((Get-Date) -ge $stopDeadline)
 if ($remaining.Count -gt 0) {
     throw "Ports still listening: $($remaining.LocalPort -join ', '). Check .\scripts\status.ps1."
 }

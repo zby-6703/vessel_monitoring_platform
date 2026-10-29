@@ -255,7 +255,20 @@ CAMERA_ONVIF_ZOOM_TOLERANCE=0.005
 
 ### 摄像头接入
 
-在 `.env` 配置后重启 API，然后在实时监测页启动摄像头采集：
+首次接入可使用本机配置工具，使用项目的 `Train` 解释器运行：
+
+```powershell
+& 'D:\app\miniconda3\envs\Train\python.exe' .\scripts\configure-camera.py --credentials-only
+& 'D:\app\miniconda3\envs\Train\python.exe' .\scripts\configure-camera.py --discover
+```
+
+第一个命令打开本机窗口填写设备 IP、HTTP/RTSP 端口和账号密码；第二个命令读取设备实际声明的 ONVIF 服务地址、媒体 Profile、视频源和 PTZ 配置标识，并取得主码流 URI。密码只保存到 Git 忽略的本机 `.env`；发现报告、首次配置前的备份保存在 `data/camera-setup/`，终端输出不包含密码或带凭据的取流地址。默认入口为设备的 `/onvif/device_service`，其他入口可在 `.env` 的 `CAMERA_ONVIF_DEVICE_URL` 中明确指定。设备返回不同主机的服务或流地址时拒绝发送凭据，不跟随重定向。
+
+自动选择优先采用支持 PTZ 的最高分辨率配置；多个配置分辨率相同时会列出候选 Token，需要使用 `--profile-token` 明确选择从设备读取的主码流 Token。之后重复发现可沿用已保存的选择。该工具只查询设备能力，不移动镜头、不修改摄像头编码参数，也不把设备位置猜算为光学倍率。`CAMERA_ONVIF_ZOOM_CALIBRATION` 仍须通过实际镜头倍率与位置反馈标定。
+
+远程链路可使用 EasyTier：两台电脑加入同一私有组网，仅在现场电脑发布摄像头地址的 `/32` 子网代理。先在运行后端的电脑验证 HTTP 和 RTSP 可达，再运行上述工具。RTSP 使用 `OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp`；设备返回的编码帧率会写入 `LIVE_CAPTURE_FPS_OVERRIDE`，避免部分相机 RTSP 声明 100 fps、实际编码 25 fps 时生成不必要的重复帧。值为 `0` 时沿用源帧率，`LIVE_CAPTURE_FPS` 仍只作无效帧率的后备值。
+
+完成配置后重启 API，在实时监测页启动摄像头采集并检查镜头能力。开启自动光学循环前需确认真实倍率标定已完成。服务重启会结束当前采集会话；启动后重新点击“启动摄像头采集”。也可以手动填写 `.env`：
 
 ```dotenv
 LIVE_CAMERA_ID=camera-01

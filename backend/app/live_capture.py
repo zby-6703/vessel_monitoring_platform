@@ -164,7 +164,11 @@ class CameraCapture:
             if not opened:
                 raise RuntimeError("无法连接摄像头视频源，请检查地址、账号、网络和编码格式")
             fps = float(capture.get(cv2.CAP_PROP_FPS))
-            if not math.isfinite(fps) or fps < 1 or fps > 120:
+            if settings.live_capture_fps_override:
+                if not math.isfinite(settings.live_capture_fps_override) or not 1 <= settings.live_capture_fps_override <= 120:
+                    raise ValueError("LIVE_CAPTURE_FPS_OVERRIDE 必须为 0（自动）或 1–120 之间的真实帧率")
+                fps = settings.live_capture_fps_override
+            elif not math.isfinite(fps) or fps < 1 or fps > 120:
                 fps = settings.live_capture_fps
             validate_recording_interval(frame_step, fps)
             with self.lock:
@@ -514,10 +518,19 @@ class OnvifControl:
         response.raise_for_status()
         return document
 
+    def _autofocus_supported(self, settings: Settings) -> bool:
+        if not settings.camera_onvif_imaging_url or not settings.camera_onvif_source_token:
+            return False
+        options = self._request(settings, self.IMAGING, "GetOptions",
+            f"<t:VideoSourceToken>{escape(settings.camera_onvif_source_token)}</t:VideoSourceToken>")
+        return any(element.tag.rsplit("}", 1)[-1] == "AutoFocusModes" and (element.text or "").strip().upper() == "AUTO"
+                   for element in options.iter())
+
     def status(self) -> dict:
         settings = get_effective_settings()
         configured = self.configured(settings)
         response = {"configured": configured, "supported": False, "focus_supported": False,
+                    "autofocus_supported": False, "focus_error": None,
                     "absolute_zoom_supported": False, "calibrated": False,
                     "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None}
         if not configured:
@@ -530,6 +543,13 @@ class OnvifControl:
             response.update(supported=zoom_supported,
                 focus_supported=bool(settings.camera_onvif_imaging_url and settings.camera_onvif_source_token),
                 error=None if zoom_supported else "该设备未声明 ONVIF 连续光学变焦能力")
+            if response["focus_supported"]:
+                try:
+                    response["autofocus_supported"] = self._autofocus_supported(settings)
+                    if not response["autofocus_supported"]:
+                        response["focus_error"] = "设备未声明 ONVIF 自动对焦能力，可使用近焦、远焦或设备网页调整对焦"
+                except Exception as exc:
+                    response["focus_error"] = safe_camera_error(exc, settings)
             try:
                 options = self._zoom_options(settings)
                 response["absolute_zoom_supported"] = True
@@ -568,6 +588,8 @@ class OnvifControl:
                 if not settings.camera_onvif_imaging_url or not settings.camera_onvif_source_token:
                     raise ValueError("手动/自动对焦需要配置 ONVIF Imaging 地址和 VideoSource Token")
                 if action == "autofocus":
+                    if not self._autofocus_supported(settings):
+                        raise ValueError("摄像头未声明 ONVIF 自动对焦能力，请使用近焦、远焦或设备网页调整对焦")
                     self._request(settings, self.IMAGING, "SetImagingSettings", source +
                         "<t:ImagingSettings><tt:Focus><tt:AutoFocusMode>AUTO</tt:AutoFocusMode></tt:Focus></t:ImagingSettings><t:ForcePersistence>false</t:ForcePersistence>")
                 else:

@@ -1,4 +1,5 @@
-# 新模型模板：训练入口须为 RGB 0~1，不适用于现有旧权重。
+# 新八类模型模板：原 M 合并进 0；训练入口须为 RGB 0~1。
+# 不适用于现有九类旧权重；保留其原部署配置。
 # 复制到新模型目录并命名为 deploy_config.yaml。
 model_type: draftformer
 onnx_file: model.onnx
@@ -14,12 +15,12 @@ input:
   pixel_std: [255.0, 255.0, 255.0]
   pad_value: 0
 outputs:
-  pred_logits: '[1,Qd+Qs,9] raw logits; segmentation uses channel 0'
+  pred_logits: '[1,Qd+Qs,8] raw logits; segmentation uses channel 0'
   pred_boxes: '[1,Qd+Qs,4] normalized cxcywh'
   pred_masks: '[1,Qd+Qs,Hm,Wm] raw logits including unused detection slots'
 tasks:
   detection_queries: 100  # 改为新模型真实 Qd；Qs>=1，无需必须保留原来的 40
-  num_det_classes: 9
+  num_det_classes: 8
   num_seg_classes: 1
 det_class_map:
   '0': 0
@@ -30,8 +31,7 @@ det_class_map:
   '5': 5
   '6': 6
   '8': 7
-  M: 8
-class_names: ['0', '1', '2', '3', '4', '5', '6', '8', 'M']
+class_names: ['0', '1', '2', '3', '4', '5', '6', '8']  # 0 类包含原 M；ID 7 对应字符 8
 seg_class_map:
   water: 0  # 输出通道 0；最终二值 mask 仍是 1=水体、0=非水体
 postprocess:

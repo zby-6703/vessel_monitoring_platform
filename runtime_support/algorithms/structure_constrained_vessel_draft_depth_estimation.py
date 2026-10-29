@@ -152,7 +152,7 @@ class AxisInfo:
 # =============================================================================
 
 class GlobalTemplate:
-    """标准物理刻度模板"""
+    """标准物理刻度模板；整米小数位统一为 0，匹配时兼容旧模型的 M。"""
     def __init__(self):
         self.sequence = []
         # 生成 6.0 到 0.2 的序列
@@ -165,7 +165,7 @@ class GlobalTemplate:
             dec_part = int(round((val - int_part) * 10))
             
             str_int = str(int_part)
-            str_dec = 'M' if dec_part == 0 else str(dec_part)
+            str_dec = str(dec_part)
             
             self.sequence.append({
                 'int_char': str_int,
@@ -548,7 +548,7 @@ class GridPatternMatcher:
         dec_char = right_box.cls_name
         if int_char not in {'0', '1', '2', '3', '4', '5', '6'}:
             return None
-        if dec_char not in {'M', '2', '4', '6', '8'}:
+        if dec_char not in {'0', 'M', '2', '4', '6', '8'}:
             return None
 
         decimal = 0 if dec_char == 'M' else int(dec_char)
@@ -812,12 +812,17 @@ class GridPatternMatcher:
                 left_box, right_box = self._classify_left_right(row_boxes)
                 
                 # 辅助函数：计算单框得分
-                def get_box_score(box, target_char):
+                def get_box_score(box, target_char, decimal_column=False):
                     if box is None: return 0.0
                     
                     # 基础分值 * 置信度
                     w = box.conf
-                    if box.cls_name == target_char:
+                    zero_alias = (
+                        decimal_column
+                        and box.cls_name in {'0', 'M'}
+                        and target_char in {'0', 'M'}
+                    )
+                    if box.cls_name == target_char or zero_alias:
                         return SCORE_MATCH * w
                     else:
                         # 字符混淆矩阵 (简单的硬编码示例)
@@ -831,7 +836,7 @@ class GridPatternMatcher:
 
                 # 计算左右两列的得分
                 s_int = get_box_score(left_box, target_int)
-                s_dec = get_box_score(right_box, target_dec)
+                s_dec = get_box_score(right_box, target_dec, decimal_column=True)
                 
                 current_score += (s_int + s_dec)
                 if left_box: valid_box_count += 1

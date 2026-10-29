@@ -2,6 +2,8 @@
 
 核对日期：2026-10-29。适用于当前 `ONNXShipDETRPredictor`、`ONNXDraftFormerPredictor` 和单帧推理链路。
 
+新版模型 B 采用八类 `0,1,2,3,4,5,6,8`，其中原来的 `M` 已合并到 `0` 类。平台已支持这套语义，并兼容旧九类模型；本文的模型 B 模板及导出示例以新版八类为准。
+
 本文区分“当前后端直接兼容的要求”和“可调整的训练/导出选择”。你可以采用新的轻量骨干、检测头和分割头，不必继续使用 ShipDETR/DraftFormer 架构；但导出的 ONNX 必须符合下面的张量接口，或者以后增加专用后端适配器。仅将 `.pt` 转成 `.onnx`，不代表接口已经兼容。
 
 ## 1. 两个模型的职责与接口总表
@@ -24,14 +26,14 @@ OpenCV BGR 原始帧
 | 输入 | 单个 `float32 [1,3,H,W]` 张量 | 单个 `float32 [1,3,H,W]` 张量 |
 | 当前权重输入尺寸 | `[1,3,540,960]` | `[1,3,640,256]` |
 | 当前颜色/数值 | BGR、0～255，模型内部归一化 | RGB、0～255，模型内部归一化 |
-| 输出 0 | `pred_logits [1,N,3]` | `pred_logits [1,Q,9]` |
+| 输出 0 | `pred_logits [1,N,3]` | 新八类：`pred_logits [1,Q,8]`；旧九类：`[1,Q,9]` |
 | 输出 1 | `pred_boxes [1,N,4]` | `pred_boxes [1,Q,4]` |
 | 输出 2 | 无 | `pred_masks [1,Q,Hm,Wm]` |
-| 当前实际输出 | `N=300` | `Q=140`，前 100 个检测、后 40 个分割；`Hm=160,Wm=64` |
+| 当前旧权重实际输出 | `N=300` | `Q=140`，前 100 个检测、后 40 个分割；`C=9,Hm=160,Wm=64` |
 | 分类分数 | 原始 logits；平台做 sigmoid | 原始 logits；平台做 sigmoid |
 | 框格式 | 相对填充后输入图的归一化 `cx,cy,w,h` | 同左；相对吃水裁剪图经过 letterbox 后的输入 |
 
-上表的现有实际形状已在 Train 环境中对仓库权重执行 CPU 推理核实。新模型尚未训练，这不构成新模型的精度、速度或 GPU 验收。
+上表的旧权重实际形状已在 Train 环境中对仓库权重执行 CPU 推理核实。尚未收到新版实际权重，这不构成新版模型的精度、速度或 GPU 验收。
 
 ## 2. 共同硬性要求
 
@@ -104,24 +106,37 @@ pred_boxes:  float32 [1,N,4]  # cx/W, cy/H, box_width/W, box_height/H
 
 ### 5.1 字符类别与查询排列
 
-保持当前九类可直接复用吃水估计算法：
+新版检测分支严格使用以下八类，原 `M` 目标也输出类别 ID 0：
 
 ```text
-ID:    0    1    2    3    4    5    6    7    8
-name: '0'  '1'  '2'  '3'  '4'  '5'  '6'  '8'  'M'
+ID:    0    1    2    3    4    5    6    7
+name: '0'  '1'  '2'  '3'  '4'  '5'  '6'  '8'
 ```
 
-注意 ID 7 对应字符 `'8'`，ID 8 对应大写 `'M'`。当前没有字符 `'7'`、`'9'`。每个框标注单个刻度字符，不是将 `4M`、`42` 或一整行合为一个类别。当前深度模板为 0.2～6.0 米、间隔 0.2 米；扩展字符或其他计量标准时还需调整后续物理解析算法。
+注意 ID 7 对应字符 `'8'`；新模型没有 ID 8，也没有独立的 `M`、字符 `'7'` 或 `'9'` 类。每个框对应单个刻度字符，不是将 `4M`、`42` 或一整行合为一个类别。当前深度模板为 0.2～6.0 米、间隔 0.2 米；其他计量标准需要另行调整物理解析算法。
+
+`0` 类的业务解释已经在平台中实现：
+
+| 检测字符对 | 解析结果 |
+| --- | --- |
+| 新模型 `40`（右侧 0 可能来自原 M） | 4.0 米 |
+| 旧模型 `4M` | 4.0 米 |
+| `42` | 4.2 米 |
+| `02` | 0.2 米，左侧 0 仍是整数零 |
+
+整米模板的小数位统一为 `0`，旧模型右侧 `M` 按零参与同等匹配评分。别名只应用于小数位，不会把左侧 `M` 当作整数 0，也不会把所有检测到的 `0` 改写成 `M`。API/标注中的新版字符名称保持 `0`，即模型类别本身。
+
+保留旧九类模型时，继续使用其原配置及类别顺序 `0,1,2,3,4,5,6,8,M`、`num_det_classes: 9` 和真实九通道输出。不要只将旧权重配置改成 8，也不需要给新模型补一个虚假的 `M` 输出通道。
 
 定义检测槽数 `Qd`、分割槽数 `Qs>=1`、总槽数 `Q=Qd+Qs`：
 
 ```text
-pred_logits: float32 [1,Q,9]
+pred_logits: float32 [1,Q,8]
 pred_boxes:  float32 [1,Q,4]
 pred_masks:  float32 [1,Q,Hm,Wm]
 
 前 Qd 槽：
-  logits[:Qd,:9]  → 字符分类原始 logits
+  logits[:Qd,:8]  → 字符分类原始 logits
   boxes[:Qd,:]    → 归一化 cxcywh
   masks[:Qd,:,:]  → 当前平台不使用，但必须保留这些槽
 
@@ -131,7 +146,9 @@ pred_masks:  float32 [1,Q,Hm,Wm]
   boxes[Qd:,:]   → 当前平台不使用，可填 0
 ```
 
-配置中的 `tasks.detection_queries` 必须等于 `Qd`，`tasks.num_det_classes: 9`、`tasks.num_seg_classes: 1`。**不能只返回 `[1,Qs,Hm,Wm]` 的 mask**，否则后端从 `Qd` 开始切片后会丢失水体。分割槽其余 8 个分类通道可填低 logits。
+配置中的 `tasks.detection_queries` 必须等于 `Qd`，新模型设置 `tasks.num_det_classes: 8`、`tasks.num_seg_classes: 1`。**不能只返回 `[1,Qs,Hm,Wm]` 的 mask**。分割槽其余 7 个分类通道可填低 logits；分割槽第 0 通道表示 water，检测槽第 0 通道表示字符 0，二者由查询位置区分。
+
+平台会检查类别 ID 从 0 连续编号、类别名称数量与 `num_det_classes` 一致；执行推理时还会检查 logits 通道数、单张 batch、三个输出的 Q 一致且至少保留一个分割槽。八类配置搭配九通道图、错误输出顺序或缺失分割槽将明确报错，避免静默生成错位类别。请检查真正的 ONNX 张量，不只修改 YAML 的说明字段。
 
 `Qd` 不必是 100、`Qs` 不必是 40；`Hm,Wm` 也不强制是 H/4、W/4。它们表示覆盖整个 letterbox 输入的低分辨率网格。增减查询或降低分割分辨率后需实测速度和水线误差。
 
@@ -156,7 +173,7 @@ sem_water = sum(
 
 因此不能把二值 0/1 mask、已经 sigmoid 的概率图、背景/水体二通道 argmax 标签，直接当作 `pred_masks`。平台还会对它做 sigmoid 和查询融合。
 
-字符分支将所有 `Qd×9` 分数摊平后取全局 top-k，同一个查询可能产生多个类别候选；随后按配置执行 NMS，默认 `class_aware`、IoU 0.5、top-k 80。若一个框存在多个高分类分数，需要在训练或包装层处理这种歧义，并检查后续刻度去重的实际效果。
+字符分支将所有 `Qd×8` 分数摊平后取全局 top-k，同一个查询可能产生多个类别候选；随后按配置执行 NMS，默认 `class_aware`、IoU 0.5、top-k 80。若一个框存在多个高分类分数，需在导出包装层处理或检查后续刻度去重的实际效果。
 
 ### 5.3 轻量语义分割头如何接入
 
@@ -175,7 +192,7 @@ class DraftExportAdapter(torch.nn.Module):
         # core 的输入归一化方式必须与部署配置一致。
         # 必须自行实现训练网络到以下三个张量的解码：
         det_logits, det_boxes, water_logits = self.core(images)
-        # [B,Qd,9]、[B,Qd,4]、[B,1,Hm,Wm]；水体是原始 logits。
+        # [B,Qd,8]、[B,Qd,4]、[B,1,Hm,Wm]；水体是原始 logits。
         batch, queries, classes = det_logits.shape
         hm, wm = water_logits.shape[-2:]
         water_score = torch.cat([
@@ -218,7 +235,7 @@ class DraftExportAdapter(torch.nn.Module):
 
 **模板采用新模型常用的 RGB、平台外部 `/255`，与现有旧权重的模型内部归一化不同。仅供新模型选择并对齐训练；不要用模板直接覆盖旧权重配置。** 模板保留当前宽高作为起点，可根据训练尺寸修改。
 
-`Qd` 只在模型 B 配置中参与检测/分割切分；A 的 `N` 无需另填配置。类别名同时出现在多个字段时要保持一致；B 优先读取 `det_class_map`，A 优先读取 `class_names` 再回退 `class_id_to_name`。
+`Qd` 只在模型 B 配置中参与检测/分割切分；A 的 `N` 无需另填配置。类别名同时出现在多个字段时要保持一致；B 优先读取 `det_class_map`，A 优先读取 `class_names` 再回退 `class_id_to_name`。八类模板中 `det_class_map`、`class_names`、`tasks.num_det_classes` 已同步；无需添加新的 M→0 配置开关。
 
 导出调用示意如下。`export_model` 必须是已加载训练权重、已经完成上述接口包装的 `torch.nn.Module`；`.pt` 可能是 state_dict、训练 checkpoint 或框架封装对象，没有适用于所有训练架构的通用加载命令。
 
@@ -251,7 +268,7 @@ def export_platform_onnx(export_model, destination, *, width, height, multitask)
 
 PyTorch 2.10 默认推荐 `dynamo=True`；上面显式选用另一导出路径是为项目 opset 17 基线提供明确示例，不代表新架构都能用这一导出器。可使用 dynamo 导出，但必须检查最终图的真实 opset、输入输出、IR 与运行结果，不能只看调用参数或“导出成功”。参数语义参见 [PyTorch 2.10 ONNX 官方文档](https://docs.pytorch.org/docs/2.10/onnx.html)。
 
-本文的导出函数、语义分割包装层和配置模板已使用合成小模型完成 `torch → ONNX checker → ONNX Runtime → 当前平台适配器` 验证，检查了 FP32 数值对齐、RGB `/255`、类别、框坐标及水体掩码。这个检查验证接口设计与示例能衔接，不替代未来训练模型的验收。
+本文的导出函数、语义分割包装层和八类配置模板已使用合成小模型完成 `torch → ONNX checker → ONNX Runtime → 当前平台适配器` 验证，检查了 FP32 数值对齐、RGB `/255`、类别、框坐标及水体掩码。八类 `0` 与旧九类 `M` 的整米解析、跨整米网格匹配和最终吃水计算另有回归测试。这个检查验证接口设计与示例能衔接，不替代新版实际权重的验收。
 
 所有 Python、导出、验证和依赖安装均使用 Conda `Train`，例如：
 
@@ -264,11 +281,11 @@ conda run -n Train python -c "import onnx; onnx.checker.check_model('models/your
 
 ## 8. 替换前的验收要求
 
-1. **结构检查**：ONNX checker 通过；用 ONNX Runtime 读取真实输入输出的名称、顺序、类型、形状；使用真实图片执行后确认所有值有限。模型 B 三个输出的 Q 必须相等，且 Q 大于 `detection_queries`。
+1. **结构检查**：ONNX checker 通过；用 ONNX Runtime 读取真实输入输出的名称、顺序、类型、形状；使用真实图片执行后确认所有值有限。新版模型 B 的 `pred_logits` 必须为 `[1,Q,8]`，三个输出的 Q 必须相等，且 Q 大于 `detection_queries`。
 2. **数值对齐**：同一张原图使用平台的 `predictor.preprocess(image)` 产生完全相同输入，分别送入 PyTorch 包装模型与 ONNX，再比较原始 logits、框和 mask。FP32 可先以 `atol=1e-4,rtol=1e-3` 为诊断起点，容差需要按模型确定；同时比较解码结果，不能只看均值误差。简化、量化或精度转换后重新对齐。
 3. **真实适配器检查**：实例化当前平台的两个适配器，执行 A 的 `predictor(frame)`、B 的 `predictor.predict(draft_crop)`；验证所有类别、框、二值水体与吃水读数，不能只运行裸 `InferenceSession`。
 4. **坐标回映**：至少覆盖横图、竖图、非目标宽高比图、边缘目标和小字符；检查框与水线是否因去填充、缩放发生偏移。B 的输出先回到局部裁剪图，平台再叠加区域偏移到整帧，模型不要自行再加原帧偏移。
-5. **边界场景**：无船、无字符、无水体、同帧多船、重复候选、反光/倒影、模糊遮挡、不同倍率，以及阈值附近预测。未检测到可靠刻度时允许吃水估计失败，不能伪造读数。
+5. **边界场景**：无船、无字符、无水体、同帧多船、重复候选、反光/倒影、模糊遮挡、不同倍率，以及阈值附近预测。八类模型重点验证原 M 输出为 0 后的 `40→4.0`、`42→4.2`、`02→0.2` 和 `4.2→4.0→3.8` 的跨整米排列。单个 4 不等同于完整 40；未检测到可靠刻度时允许吃水估计失败，不能伪造读数。
 6. **业务阈值**：A 适配器默认 0.1、top-k 100；B 默认 0.1、top-k 80。单帧服务还会用 0.3 过滤船/区域/字符，吃水估计器也设置 `min_confidence=0.3`；只调低 YAML 阈值不会取消下游过滤。新模型置信度需要校准。
 7. **速度与精度**：在同一设备、同一分辨率和样本集上预热后记录推理延迟 p50/p95、端到端延迟、显存、文件大小；同时记录区域检测精度、小字符召回、水线像素误差和最终吃水误差。模型 B 按每个吃水 ROI 执行，完整链路还包含 OCR、恢复坐标与深度估计；参数少不保证整个平台更快。
 8. **部署设备**：至少执行 CPU 验证；实际使用 CUDA 时再执行 CUDA 验证，确认会话激活 `CUDAExecutionProvider`。当前平台请求 CUDA 却未成功加载该 provider 时会报错；会话保留 CPU provider，部分算子仍可能在 CPU 执行，因此速度结论以实际测量为准。CUDA/cuDNN 包匹配参见 [ONNX Runtime CUDA 官方文档](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)，图版本兼容参见 [官方兼容说明](https://onnxruntime.ai/docs/reference/compatibility.html)。

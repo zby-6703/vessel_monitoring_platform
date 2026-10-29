@@ -373,13 +373,15 @@ class ONNXDraftFormerPredictor:
         det_class_map = self.cfg.get("det_class_map") or {}
         if det_class_map:
             ordered = sorted(((int(class_id), str(name)) for name, class_id in det_class_map.items()), key=lambda item: item[0])
+            if [class_id for class_id, _ in ordered] != list(range(len(ordered))):
+                raise ValueError("Draft detection class IDs must be contiguous from 0")
             self.class_names = [name for _, name in ordered]
         else:
-            self.class_names = list(
+            self.class_names = [str(name) for name in (
                 self.cfg.get("class_names")
                 or (self.cfg.get("postprocess") or {}).get("detection_class_names")
                 or []
-            )
+            )]
         self.det_class_map = {name: index for index, name in enumerate(self.class_names)}
         self.seg_class_map = {
             str(name): int(class_id)
@@ -388,6 +390,41 @@ class ONNXDraftFormerPredictor:
         self.det_q = int(tasks.get("detection_queries", 100))
         self.num_det = int(tasks.get("num_det_classes", len(self.class_names) or 9))
         self.num_seg = int(tasks.get("num_seg_classes", 1))
+        if self.num_det <= 0 or len(self.class_names) != self.num_det:
+            raise ValueError(
+                f"Draft num_det_classes={self.num_det} does not match "
+                f"{len(self.class_names)} configured detection class names"
+            )
+        if self.det_q <= 0 or self.num_seg <= 0:
+            raise ValueError("Draft detection_queries and num_seg_classes must be positive")
+
+    def _validate_outputs(self, outputs: list[np.ndarray]) -> None:
+        """Reject incompatible exports before channel slicing can corrupt labels."""
+        if len(outputs) != 3:
+            raise ValueError(
+                "Draft ONNX requires exactly 3 outputs in order: "
+                "pred_logits, pred_boxes, pred_masks"
+            )
+        logits, boxes, masks = outputs
+        expected_classes = max(self.num_det, self.num_seg)
+        if logits.ndim != 3 or logits.shape[0] != 1 or logits.shape[2] != expected_classes:
+            raise ValueError(
+                f"Draft pred_logits must have shape [1,Q,{expected_classes}] "
+                f"for the configured classes, got {logits.shape}"
+            )
+        queries = logits.shape[1]
+        if queries <= self.det_q:
+            raise ValueError(
+                f"Draft Q={queries} must exceed detection_queries={self.det_q} "
+                "to include at least one segmentation query"
+            )
+        if boxes.shape != (1, queries, 4):
+            raise ValueError(f"Draft pred_boxes must have shape [1,{queries},4], got {boxes.shape}")
+        if masks.ndim != 4 or masks.shape[:2] != (1, queries) or min(masks.shape[2:]) <= 0:
+            raise ValueError(
+                f"Draft pred_masks must have shape [1,{queries},Hm,Wm] "
+                f"with positive spatial dimensions, got {masks.shape}"
+            )
 
     def preprocess(self, image: np.ndarray) -> tuple[np.ndarray, dict]:
         model_image = image
@@ -423,7 +460,9 @@ class ONNXDraftFormerPredictor:
             image = image_or_path
 
         tensor, meta = self.preprocess(image)
-        logits, boxes, masks = self.session.run(None, {self.input_name: tensor})
+        outputs = self.session.run(None, {self.input_name: tensor})
+        self._validate_outputs(outputs)
+        logits, boxes, masks = outputs
         logits, boxes, masks = logits[0], boxes[0], masks[0]
 
         det_logits = logits[: self.det_q, : self.num_det]

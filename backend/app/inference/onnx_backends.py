@@ -92,6 +92,9 @@ def _create_session(onnx_path: Path, device: str):
     providers = _providers(device)
     cuda_requested = providers[0] == "CUDAExecutionProvider"
     if cuda_requested:
+        # Both deployed FP32 packages were validated with TF32 disabled.
+        # Set this before importing/loading CUDA libraries, including direct adapter use.
+        os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
         _register_torch_cuda_libraries()
     try:
         import onnxruntime as ort
@@ -109,7 +112,10 @@ def _create_session(onnx_path: Path, device: str):
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     so.log_severity_level = 3
     try:
-        session = ort.InferenceSession(str(onnx_path), sess_options=so, providers=providers)
+        session = ort.InferenceSession(
+            str(onnx_path), sess_options=so, providers=providers,
+            provider_options=[{"use_tf32": "0"}, {}] if cuda_requested else None,
+        )
     except Exception as exc:  # noqa: BLE001
         if cuda_requested:
             raise RuntimeError(

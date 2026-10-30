@@ -1,0 +1,27 @@
+# Three-class RT-DETRv4-S; training/inference entry is RGB float32 [0,1].
+model_type: shipdet
+onnx_file: model.onnx
+opset: 17
+input:
+  name: images
+  dtype: float32
+  layout: NCHW
+  image_size_wh: [960, 544]
+  image_format: RGB
+  include_norm_in_model: false
+  pixel_mean: [0.0, 0.0, 0.0]
+  pixel_std: [255.0, 255.0, 255.0]
+  pad_value: 0
+output:
+  names: [pred_logits, pred_boxes]
+  box_format: cxcywh_normalized
+class_names: [ship, waterlineArea, name]
+class_id_to_name:
+  0: ship
+  1: waterlineArea
+  2: name
+num_classes: 3
+postprocess:
+  score_thresh: 0.1
+  topk: 100
+# Native Hungarian one-to-one detector: no graph/backend NMS, no extra input.

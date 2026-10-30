@@ -7,7 +7,7 @@ input:
   name: images
   dtype: float32
   layout: NCHW
-  image_size_wh: [960, 540]  # [W,H]；若网络要求 32 倍数，可同步改为 [960,544]
+  image_size_wh: [960, 544]  # [W,H]，与当前 RT-DETRv4-S 部署包一致
   image_format: RGB
   include_norm_in_model: false
   pixel_mean: [0.0, 0.0, 0.0]

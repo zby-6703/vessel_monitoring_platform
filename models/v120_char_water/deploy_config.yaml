@@ -1,0 +1,40 @@
+# V120 best23: trained character detection + semantic water segmentation.
+# Input height=640, width=320; RGB /255 is performed by the platform.
+model_type: draftformer
+onnx_file: model.onnx
+opset: 17
+input:
+  name: images
+  dtype: float32
+  layout: NCHW
+  image_size_wh: [320, 640]
+  image_format: RGB
+  include_norm_in_model: false
+  pixel_mean: [0.0, 0.0, 0.0]
+  pixel_std: [255.0, 255.0, 255.0]
+  pad_value: 0
+outputs:
+  pred_logits: '[1,101,8] raw logits; last query channel 0 is water'
+  pred_boxes: '[1,101,4] normalized cxcywh; last query is zero'
+  pred_masks: '[1,101,640,320] raw logits; first 100 slots unused and zero'
+tasks:
+  detection_queries: 100
+  num_det_classes: 8
+  num_seg_classes: 1
+det_class_map:
+  '0': 0
+  '1': 1
+  '2': 2
+  '3': 3
+  '4': 4
+  '5': 5
+  '6': 6
+  '8': 7
+class_names: ['0', '1', '2', '3', '4', '5', '6', '8']
+seg_class_map:
+  water: 0
+postprocess:
+  score_thresh: 0.1
+  topk: 80
+  nms_thresh: 0.5
+  nms_type: class_aware

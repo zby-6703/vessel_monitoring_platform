@@ -2,7 +2,7 @@
 
 VesselSight 是一个可独立部署的船舶视频/图像分析平台。它提供船舶与区域检测、船名识别、吃水读数估计、视频跟踪、离线批处理、结果归档，以及用于现场系统对接的实时 WebSocket 接口。
 
-源代码、运行数据和模型权重已分离：克隆本仓库即可构建服务；运行数据和模型权重已发布到 GitHub Releases：[resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0)。在执行真实推理前，只需按 [models/README.md](models/README.md) 放入对应的 ONNX 权重。
+源代码、运行数据和模型权重已分离。当前使用 RT-DETRv4-S 船舶与区域检测、V120 八类字符检测与水体分割，以及独立船名 OCR。克隆仓库后按 [模型说明](models/README.md) 准备当前 ONNX 部署包；运行数据和船名 OCR 资源可从 [resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0) 获取，该历史资源包不包含前两套新权重。
 
 训练新模型或从 `.pt` 导出部署模型前，请参阅 [新模型 ONNX 导出与接入要求](docs/onnx-model-contract.md)，其中包含三类检测、字符检测与水体分割的张量接口、预处理、配置模板和验收步骤。
 
@@ -73,7 +73,7 @@ cd vessel_monitoring_platform
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，至少替换 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` 和 `API_INGEST_TOKEN` 为强随机值。随后从 [resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0) 下载运行数据和模型资源包，并按 release 中的目录结构解压到仓库根目录；再按 [models/README.md](models/README.md) 将三个 ONNX 权重置于 `models/`。`.env`、权重、上传文件、数据库和结果均不会被提交到 Git。
+编辑 `.env`，至少替换 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` 和 `API_INGEST_TOKEN` 为强随机值。随后按 [模型说明](models/README.md) 将当前三套 ONNX 权重置于 `models/`；历史 release 可提供运行数据及船名 OCR，但不要用其中前两套旧模型覆盖当前部署。`.env`、权重、上传文件、数据库和结果均不会被提交到 Git。
 
 ### 2. CPU 部署
 

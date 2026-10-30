@@ -1,0 +1,12 @@
+{
+  "zip_sha256": "fe7611dac60ccabd903d6cb240dbe982981471a0780b8aafe481d71270f6d994",
+  "zip_bytes": 38379195,
+  "contents": {
+    "model.onnx": "922c3d4e271b23ddc621693a46698db11412c432ab3fa9ccc45e04f425e8c1e9",
+    "deploy_config.yaml": "8a730cc15f7ee58ed7cbdaa3cd875a6230519d29b9c5e1f2bac7b6c2ded48a4b",
+    "README.md": "3205ab8992ce90a1c7fb5b541ae5fac895c0ee144e31b2dff607f9d2be1688a9",
+    "validation_report.json": "4f78c843a7aa3e07de73bbbf0d72636f8db019c2f12e400a367838272ccd0956",
+    "example_prediction.jpg": "6b19960d8a546c4912f320e3f694ed7e81247d05b28634dcfebbd8f94b668280"
+  },
+  "checkpoint_sha256": "db038ac298a824fe7b823757d3a5b0f6778173539a603631cae65796a35d9352"
+}

@@ -1,8 +1,10 @@
 # 新模型 ONNX 导出与接入要求
 
-核对日期：2026-10-29。适用于当前 `ONNXShipDETRPredictor`、`ONNXDraftFormerPredictor` 和单帧推理链路。
+核对日期：2026-10-30。适用于当前 `ONNXShipDETRPredictor`、`ONNXDraftFormerPredictor` 和单帧推理链路。
 
 新版模型 B 采用八类 `0,1,2,3,4,5,6,8`，其中原来的 `M` 已合并到 `0` 类。平台已支持这套语义，并兼容旧九类模型；本文的模型 B 模板及导出示例以新版八类为准。
+
+当前部署包为 `models/shipdet_rtdetrv4_s_960x544` 与 `models/v120_char_water`，部署文件及校验值见 [模型说明](../models/README.md)。以下“当前”形状均指这两套权重。
 
 本文区分“当前后端直接兼容的要求”和“可调整的训练/导出选择”。你可以采用新的轻量骨干、检测头和分割头，不必继续使用 ShipDETR/DraftFormer 架构；但导出的 ONNX 必须符合下面的张量接口，或者以后增加专用后端适配器。仅将 `.pt` 转成 `.onnx`，不代表接口已经兼容。
 
@@ -24,16 +26,16 @@ OpenCV BGR 原始帧
 | --- | --- | --- |
 | 运行时适配器 | `ONNXShipDETRPredictor` | `ONNXDraftFormerPredictor` |
 | 输入 | 单个 `float32 [1,3,H,W]` 张量 | 单个 `float32 [1,3,H,W]` 张量 |
-| 当前权重输入尺寸 | `[1,3,540,960]` | `[1,3,640,256]` |
-| 当前颜色/数值 | BGR、0～255，模型内部归一化 | RGB、0～255，模型内部归一化 |
+| 当前权重输入尺寸 | `[1,3,544,960]` | `[1,3,640,320]` |
+| 当前颜色/数值 | RGB、0～1，平台外部 `/255` | RGB、0～1，平台外部 `/255` |
 | 输出 0 | `pred_logits [1,N,3]` | 新八类：`pred_logits [1,Q,8]`；旧九类：`[1,Q,9]` |
 | 输出 1 | `pred_boxes [1,N,4]` | `pred_boxes [1,Q,4]` |
 | 输出 2 | 无 | `pred_masks [1,Q,Hm,Wm]` |
-| 当前旧权重实际输出 | `N=300` | `Q=140`，前 100 个检测、后 40 个分割；`C=9,Hm=160,Wm=64` |
+| 当前实际输出 | `N=300` | `Q=101`，前 100 个检测、后 1 个分割；`C=8,Hm=640,Wm=320` |
 | 分类分数 | 原始 logits；平台做 sigmoid | 原始 logits；平台做 sigmoid |
 | 框格式 | 相对填充后输入图的归一化 `cx,cy,w,h` | 同左；相对吃水裁剪图经过 letterbox 后的输入 |
 
-上表的旧权重实际形状已在 Train 环境中对仓库权重执行 CPU 推理核实。尚未收到新版实际权重，这不构成新版模型的精度、速度或 GPU 验收。
+上表形状已在 Train 环境中读取实际 ONNX 图核实，当前模型的本地接入验证记录见 [部署验收记录](model-deployment-2026-10-30.md)。这不等同于重新完成整个标注数据集的精度评测。
 
 ## 2. 共同硬性要求
 
@@ -73,7 +75,7 @@ BGR 图像 → 按配置可选 BGR→RGB → 等比缩放并居中填充
 
 不能只写 `value_range: '[0,1]'` 期待自动缩放；`dtype`、`layout`、`value_range`、`resize`、`opset`、输出说明等元数据也不会自动改变执行逻辑。不要重复执行 `/255` 或归一化。
 
-输入尺寸可以调整，只要模型图与配置一致。平台没有要求模型 A 必须 960×540；若骨干要求 32 倍数，可选 960×544，或者测试更低分辨率。模型 B 的默认 256×640 是窄高输入，适合局部刻度；改变尺寸需要重新检查小字符与水线精度。
+输入尺寸可以调整，只要模型图与配置一致。当前模型 A 使用 960×544，模型 B 使用 320×640 窄高输入；改变尺寸需要重新检查小字符与水线精度。
 
 ## 4. 模型 A：三类检测的详细约定
 
@@ -233,7 +235,7 @@ class DraftExportAdapter(torch.nn.Module):
 - [模型 A 配置模板](model-templates/ship_detector.deploy.yaml)
 - [模型 B 配置模板](model-templates/draft_multitask.deploy.yaml)
 
-**模板采用新模型常用的 RGB、平台外部 `/255`，与现有旧权重的模型内部归一化不同。仅供新模型选择并对齐训练；不要用模板直接覆盖旧权重配置。** 模板保留当前宽高作为起点，可根据训练尺寸修改。
+**模板采用当前模型的 RGB、平台外部 `/255`。旧模型若有模型内部归一化，仍须使用其对应配置。** 模型 B 模板使用当前 320×640 输入；实际部署包的配置应与权重一起使用。
 
 `Qd` 只在模型 B 配置中参与检测/分割切分；A 的 `N` 无需另填配置。类别名同时出现在多个字段时要保持一致；B 优先读取 `det_class_map`，A 优先读取 `class_names` 再回退 `class_id_to_name`。八类模板中 `det_class_map`、`class_names`、`tasks.num_det_classes` 已同步；无需添加新的 M→0 配置开关。
 
@@ -264,7 +266,7 @@ def export_platform_onnx(export_model, destination, *, width, height, multitask)
         )
 ```
 
-示意：A 使用 `width=960,height=540,multitask=False`；B 使用 `width=256,height=640,multitask=True`。必须先依据训练架构加载权重、完成包装，然后再调用函数；随机零输入仅用于导出与形状跟踪，不代表验收样本。
+示意：A 使用 `width=960,height=544,multitask=False`；B 使用 `width=320,height=640,multitask=True`。必须先依据训练架构加载权重、完成包装，然后再调用函数；随机零输入仅用于导出与形状跟踪，不代表验收样本。
 
 PyTorch 2.10 默认推荐 `dynamo=True`；上面显式选用另一导出路径是为项目 opset 17 基线提供明确示例，不代表新架构都能用这一导出器。可使用 dynamo 导出，但必须检查最终图的真实 opset、输入输出、IR 与运行结果，不能只看调用参数或“导出成功”。参数语义参见 [PyTorch 2.10 ONNX 官方文档](https://docs.pytorch.org/docs/2.10/onnx.html)。
 
@@ -288,7 +290,7 @@ conda run -n Train python -c "import onnx; onnx.checker.check_model('models/your
 5. **边界场景**：无船、无字符、无水体、同帧多船、重复候选、反光/倒影、模糊遮挡、不同倍率，以及阈值附近预测。八类模型重点验证原 M 输出为 0 后的 `40→4.0`、`42→4.2`、`02→0.2` 和 `4.2→4.0→3.8` 的跨整米排列。单个 4 不等同于完整 40；未检测到可靠刻度时允许吃水估计失败，不能伪造读数。
 6. **业务阈值**：A 适配器默认 0.1、top-k 100；B 默认 0.1、top-k 80。单帧服务还会用 0.3 过滤船/区域/字符，吃水估计器也设置 `min_confidence=0.3`；只调低 YAML 阈值不会取消下游过滤。新模型置信度需要校准。
 7. **速度与精度**：在同一设备、同一分辨率和样本集上预热后记录推理延迟 p50/p95、端到端延迟、显存、文件大小；同时记录区域检测精度、小字符召回、水线像素误差和最终吃水误差。模型 B 按每个吃水 ROI 执行，完整链路还包含 OCR、恢复坐标与深度估计；参数少不保证整个平台更快。
-8. **部署设备**：至少执行 CPU 验证；实际使用 CUDA 时再执行 CUDA 验证，确认会话激活 `CUDAExecutionProvider`。当前平台请求 CUDA 却未成功加载该 provider 时会报错；会话保留 CPU provider，部分算子仍可能在 CPU 执行，因此速度结论以实际测量为准。CUDA/cuDNN 包匹配参见 [ONNX Runtime CUDA 官方文档](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)，图版本兼容参见 [官方兼容说明](https://onnxruntime.ai/docs/reference/compatibility.html)。
+8. **部署设备**：至少执行 CPU 验证；实际使用 CUDA 时再执行 CUDA 验证，确认会话激活 `CUDAExecutionProvider`。当前两个部署包要求禁用 TF32；平台在加载 CUDA 库前设置 `NVIDIA_TF32_OVERRIDE=0`，并显式传入 CUDA provider 的 `use_tf32=0`。启动独立外部推理程序时也应在初始化 CUDA 前设置环境变量。当前平台请求 CUDA 却未成功加载该 provider 时会报错；会话保留 CPU provider，部分算子仍可能在 CPU 执行，因此速度结论以实际测量为准。CUDA/cuDNN 包匹配参见 [ONNX Runtime CUDA 官方文档](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)，图版本兼容参见 [官方兼容说明](https://onnxruntime.ai/docs/reference/compatibility.html)。
 
 真实适配器的最小调用示例，保存为脚本后从项目根目录使用 Train 执行：
 

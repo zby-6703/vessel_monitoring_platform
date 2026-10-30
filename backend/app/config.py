@@ -75,16 +75,16 @@ class Settings:
     camera_onvif_zoom_tolerance: float = max(.0001, min(.05, float(os.getenv("CAMERA_ONVIF_ZOOM_TOLERANCE", ".005"))))
     # Self-contained ONNX deployment packages.
     ship_detector_config: Path | None = _path_env(
-        "SHIP_DETECTOR_CONFIG", "./models/shipdetr_DetShip-new/deploy_config.yaml"
+        "SHIP_DETECTOR_CONFIG", "./models/shipdet_rtdetrv4_s_960x544/deploy_config.yaml"
     )
     ship_detector_weights: Path | None = _path_env(
-        "SHIP_DETECTOR_WEIGHTS", "./models/shipdetr_DetShip-new/model.onnx"
+        "SHIP_DETECTOR_WEIGHTS", "./models/shipdet_rtdetrv4_s_960x544/model.onnx"
     )
     draftformer_config: Path | None = _path_env(
-        "DRAFTFORMER_CONFIG", "./models/draftformer_DetCharatersAndSegWater/deploy_config.yaml"
+        "DRAFTFORMER_CONFIG", "./models/v120_char_water/deploy_config.yaml"
     )
     draftformer_weights: Path | None = _path_env(
-        "DRAFTFORMER_WEIGHTS", "./models/draftformer_DetCharatersAndSegWater/model.onnx"
+        "DRAFTFORMER_WEIGHTS", "./models/v120_char_water/model.onnx"
     )
     shipname_config: Path | None = _path_env(
         "SHIPNAME_CONFIG", "./models/svtrv2parseq_RecShipName/deploy_config.yaml"

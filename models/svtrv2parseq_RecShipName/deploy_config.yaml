@@ -1,0 +1,41 @@
+model_type: shipname
+framework: onnxruntime
+input:
+  name: images
+  layout: NCHW
+  dtype: float32
+  image_size_hw:
+  - 48
+  - 320
+  image_size_wh:
+  - 320
+  - 48
+  image_format: RGB
+  include_norm_in_model: false
+  pixel_mean:
+  - 0.5
+  - 0.5
+  - 0.5
+  pixel_std:
+  - 0.5
+  - 0.5
+  - 0.5
+  preprocess: RecTVResize + normalize
+  pad_value: 0
+output:
+  names:
+  - logits
+postprocess:
+  name: ARLabelDecode
+  character_dict_path: character_dict.txt
+  use_space_char: true
+class_names: []
+architecture:
+  algorithm: PARSeq
+  backbone: null
+character_dict: character_dict.txt
+tasks:
+  max_text_length: 25
+  notes: argmax over charset dim then AR/CTC decode using PostProcess settings.
+source:
+  notes: Deployment package is self-contained; training-source paths are intentionally omitted.

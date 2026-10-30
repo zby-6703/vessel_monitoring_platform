@@ -5,7 +5,12 @@
 # They are deliberately not versioned.
 assets/
 data/
-models/
+models/*
+!models/README.md
+!models/*/
+models/*/*
+!models/*/deploy_config.yaml
+!models/*/delivery_manifest.json
 Competition materials/
 backend/.pytest_tmp/
 backend/.pytest-tmp/

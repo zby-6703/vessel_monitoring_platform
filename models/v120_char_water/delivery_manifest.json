@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-29",
+  "package": "v120_char_water_640x320_onnx.zip",
+  "package_sha256": "878ad351e26d7fabdd345c90937b6fa01ebc02ae539bff99c1081dba4817e31d",
+  "package_bytes": 38502395,
+  "contents_sha256": {
+    "model.onnx": "fd6d0635733dce1a1c6e76855134ff1d1655d6e63434e5abad02d953bdc803e0",
+    "deploy_config.yaml": "f3b69254344e07ef55b7431ab488014e28e8db6d46dd506072f318c12f2084bd",
+    "README.md": "11f8e81a34f466787e25bccd5e6a6ce3e3f5981d2a0454f6e51c272a09c56992",
+    "model_identity.json": "fc8c45708dff4a92a4b9d4f8d5d4564c7cb4073272c84f83f2a7fe3478093f0c",
+    "validation_report.json": "3204c33dd0043ced107285ba122d02f414a7efaeeb575741608248f38bc3bd6d",
+    "diagnostics_default_tf32.json": "4542eaf89b28b8fcb49f32565001d0a0ee8264ed52bdcedb6cc1384f5fe44899"
+  },
+  "round_trip": "all members byte-verified",
+  "model_in_git": false
+}

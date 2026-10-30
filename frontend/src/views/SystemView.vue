@@ -12,10 +12,10 @@ const saving = ref(false)
 const modelSettings = ref<ModelSettings | null>(null)
 const modelForm = ref<Record<string, string>>({})
 const formError = ref('')
-const names: Record<string, string> = { ship_detection: '船舶/吃水区域/船名检测模型', draft_multitask: 'DraftFormer 多任务模型', ship_name_recognition: '船名识别模型' }
+const names: Record<string, string> = { ship_detection: 'RT-DETRv4-S 船舶与区域检测', draft_multitask: 'V120 字符检测与水体分割', ship_name_recognition: '船名识别模型' }
 const modelGroups = [
   { label: '船舶/吃水区域/船名检测', config: 'ship_detector_config', weights: 'ship_detector_weights' },
-  { label: 'DraftFormer 多任务', config: 'draftformer_config', weights: 'draftformer_weights' },
+  { label: '字符检测与水体分割', config: 'draftformer_config', weights: 'draftformer_weights' },
   { label: '船名识别', config: 'shipname_config', weights: 'shipname_weights' },
 ]
 async function load() {

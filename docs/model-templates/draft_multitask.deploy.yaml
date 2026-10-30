@@ -8,7 +8,7 @@ input:
   name: images
   dtype: float32
   layout: NCHW
-  image_size_wh: [256, 640]  # [W,H]，张量为 [1,3,640,256]
+  image_size_wh: [320, 640]  # [W,H]，张量为 [1,3,640,320]，与当前 V120 部署包一致
   image_format: RGB
   include_norm_in_model: false
   pixel_mean: [0.0, 0.0, 0.0]

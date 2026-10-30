@@ -149,6 +149,13 @@ class FrameInferenceService:
             draft=draft,
         )
 
+    def enrich_vessel(self, frame: np.ndarray, vessel: VesselFrameResult, errors: list[str]) -> VesselFrameResult:
+        """Run expensive ROI models only after realtime tracking and admission."""
+        enriched = self._full_vessel(vessel.vessel_id, frame, vessel.ship, vessel.regions, errors)
+        enriched.track_id = vessel.track_id
+        enriched.processing = dict(vessel.processing)
+        return enriched
+
     def _direct_name_vessel(self, frame: np.ndarray, errors: list[str]) -> VesselFrameResult:
         height, width = frame.shape[:2]
         region = Detection(label="ship_name_area", xyxy=(0, 0, float(width), float(height)), confidence=1.0)

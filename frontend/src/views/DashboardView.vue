@@ -2,13 +2,13 @@
 import { AlertTriangle, Anchor, Camera, FileSearch, RadioTower, ServerCog, Ship, Square, Upload, Waves } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { apiError, controlPtz, defaultRecordingSettings, getCameraStatus, getDashboard, getHealth, getLocalPlayback, getPtzStatus, getRealtimeResults, getRecordingSettings, getRecordingStatus, getStreams, startCamera, startLocalPlayback, stopCamera, stopLocalPlayback, updateRecordingSettings, type CameraStatus, type Health, type LocalPlaybackStatus, type PtzAction, type PtzStatus, type RecordItem, type RecordingSettings, type RecordingStatus, type Statistics, type StreamItem } from '../api'
+import { apiError, controlPtz, defaultRecordingSettings, getCameraStatus, getDashboard, getHealth, getLocalPlayback, getPtzStatus, getRealtimeResults, getRecordingSettings, getRecordingStatus, getStreams, selectionReasonLabel, startCamera, startLocalPlayback, stopCamera, stopLocalPlayback, updateRecordingSettings, type CameraStatus, type Health, type LocalPlaybackStatus, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordItem, type RecordingSettings, type RecordingStatus, type Statistics, type StreamItem } from '../api'
 import MetricTile from '../components/MetricTile.vue'
 import RecordingControls from '../components/RecordingControls.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
 
-interface LiveFrame { frame_timestamp: string; frame_id: number; camera_id: string; source_width: number; source_height: number; processing_ms: number; vessels: Array<any> }
+interface LiveFrame { frame_timestamp: string; frame_id: number; camera_id: string; source_width: number; source_height: number; processing_ms: number; processing_summary?: ProcessingSummary; vessels: Array<any> }
 const statistics = ref<Statistics>({ generated_at: '', today_traffic: 0, overload_alerts: 0, average_draft: null, average_displacement: null, hourly: [] })
 const records = ref<RecordItem[]>([])
 const liveRows = ref<RecordItem[]>([])
@@ -48,7 +48,8 @@ const liveFrame = computed(() => sourceMode.value === 'local' ? localOverlay.val
 const frameImage = computed(() => sourceMode.value === 'local' ? localFrame.value : cameraFrame.value)
 const monitorSrc = computed(() => sourceMode.value === 'camera' ? stream.value?.play_url || '' : '')
 const monitorConfigured = computed(() => Boolean(frameImage.value || monitorSrc.value || (sourceMode.value === 'local' ? localActive.value : cameraActive.value)))
-const latestVessel = computed(() => liveFrame.value?.vessels?.[0] || null)
+const latestVessel = computed(() => liveFrame.value?.vessels?.find((vessel) => vessel.processing?.detail_inferred) || liveFrame.value?.vessels?.find((vessel) => vessel.processing?.eligible !== false) || null)
+const lightweightTargets = computed(() => (liveFrame.value?.vessels || []).filter((vessel) => vessel.processing?.eligible === false).slice(0, 6))
 const visibleRows = computed(() => {
   const matching = liveRows.value.filter((row) => row.camera_id === monitorCameraId.value)
   return matching.length ? matching.slice(0, 12) : records.value.filter((row) => row.camera_id === monitorCameraId.value).slice(0, 12)
@@ -80,7 +81,7 @@ async function load(silent = false) {
       if (!silent && localActive.value) sourceMode.value = 'local'
     }
     if (realtimeResult.status === 'fulfilled' && !liveRows.value.length) {
-      liveRows.value = [...realtimeResult.value.frames, ...realtimeResult.value.instances].sort((a, b) => +new Date(b.captured_at) - +new Date(a.captured_at)).slice(0, 60).map((row) => ({
+      liveRows.value = [...realtimeResult.value.frames, ...realtimeResult.value.instances].filter((row) => !row.lightweight_only).sort((a, b) => +new Date(b.captured_at) - +new Date(a.captured_at)).slice(0, 60).map((row) => ({
         id: row.id, captured_at: row.captured_at, track_id: row.track_id || 0, camera_id: row.camera_id || row.source_name || 'realtime',
         ship_name: row.ship_name || 'UNKNOWN', mmsi: row.mmsi, draft_depth: row.draft_depth, displacement_tons: null, load_ratio: null,
         risk_level: row.status === 'confirmed' ? 'normal' : 'unknown', confidence: row.confidence || null,
@@ -115,15 +116,15 @@ async function saveSettings() {
   savingSettings.value = true
   try {
     const result = await updateRecordingSettings(settings.value)
-    settings.value = { ...result }; savedSettings.value = { ...result }
-    await refreshCapture(); ElMessage.success(result.enabled ? result.recording_mode === 'optical_cycle' ? '光学变焦循环策略已生效' : '数字取景录制设置已生效' : '自动录制已关闭，设置已保存')
+    settings.value = { ...defaultRecordingSettings(), ...result }; savedSettings.value = { ...settings.value }
+    await refreshCapture(); ElMessage.success(result.enabled ? '目标识别与自动录制策略已保存' : '目标识别策略已保存，自动录制保持关闭')
   } catch (error) { ElMessage.error(apiError(error, '录制设置保存失败')) } finally { savingSettings.value = false }
 }
 function resetSettings() { if (savedSettings.value) settings.value = { ...savedSettings.value } }
 function setFocusCenter(center: { x: number; y: number }) { settings.value = { ...settings.value, center_x: center.x, center_y: center.y } }
 async function sendPtz(action: PtzAction) {
   ptzBusy.value = true
-  try { await controlPtz(action); ElMessage.success(action === 'stop' ? '已停止摄像头运动' : '摄像头控制指令已发送') }
+  try { await controlPtz(action); ElMessage.success(action === 'stop' ? '已停止摄像头运动' : '摄像头控制指令已发送'); await refreshPtz(); await refreshCapture() }
   catch (error) { ElMessage.error(apiError(error, '摄像头控制失败')) } finally { ptzBusy.value = false }
 }
 function scheduleRealtimeStatisticsRefresh() {
@@ -137,6 +138,7 @@ function acceptInference(frame: LiveFrame, source: 'camera' | 'local') {
   if (source === 'local') localOverlay.value = frame
   else cameraOverlay.value = frame
   for (const vessel of frame.vessels || []) {
+    if (vessel.processing && !vessel.processing.detail_inferred) continue
     liveRows.value.unshift({
       id: Number(`${Date.now()}${vessel.ship_id}`), captured_at: frame.frame_timestamp, track_id: vessel.ship_id, camera_id: frame.camera_id,
       ship_name: vessel.ship_name || 'UNKNOWN', mmsi: vessel.mmsi || null, draft_depth: vessel.draft_depth_m,
@@ -239,7 +241,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
         <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :processing-summary="liveFrame?.processing_summary" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">
@@ -249,7 +251,8 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
           <div><span>当前目标</span><strong>{{ latestVessel.ship_name || 'UNKNOWN' }}</strong><small>ID {{ latestVessel.ship_id }} · {{ latestStages.join(' · ') || '船舶检测' }}</small></div>
           <div class="draft-reading"><span>视觉吃水</span><strong>{{ latestVessel.draft_depth_m?.toFixed(2) || '--' }}<small>m</small></strong></div>
         </div>
-        <div v-else class="compact-empty"><Ship :size="24" /><span>尚未收到实时推理结果</span></div>
+        <div v-else class="compact-empty"><Ship :size="24" /><span>{{ liveFrame?.processing_summary?.detected ? '当前目标仅检测与跟踪，等待符合重点识别条件的船舶' : '尚未收到实时推理结果' }}</span></div>
+        <ul v-if="lightweightTargets.length" class="lightweight-target-reasons" aria-label="轻量目标及筛选原因"><li v-for="vessel in lightweightTargets" :key="vessel.ship_id"><span>ID {{ vessel.ship_id }} · 轻量</span><span>{{ selectionReasonLabel(vessel.processing.reason) }}</span></li></ul>
         <el-table :data="visibleRows" height="337" size="small" table-layout="fixed" class="ops-table" empty-text="暂无真实识别记录">
           <el-table-column label="时间" width="74"><template #default="scope"><span class="mono muted-text">{{ formatTime(scope.row.captured_at) }}</span></template></el-table-column>
           <el-table-column prop="ship_name" label="船名" min-width="112" show-overflow-tooltip />

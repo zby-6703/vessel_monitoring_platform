@@ -57,6 +57,24 @@ class OpticalCycleMixin:
                     "accept_detections": self.phase in {"overview", "zoomed"} and not self._cycle_halt,
                     "zoom_factor": self.current_zoom_factor}
 
+    def observe_zoom_factor(self, factor, generation=None):
+        """Accept a read-only lens measurement only for the same idle view."""
+        with self.lock:
+            if self._optical_session or self._control_future is not None:
+                return
+            if generation is not None and generation != self._cycle_generation:
+                return
+            if factor is not None and (not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor < 1):
+                return
+            if self.current_zoom_factor != factor:
+                self._cycle_generation += 1
+            self.current_zoom_factor = factor
+
+    def invalidate_zoom_observation(self):
+        with self.lock:
+            self.current_zoom_factor = None
+            self._cycle_generation += 1
+
     def available_magnifications(self):
         getter = getattr(self.zoom_controller, "available_magnifications", None)
         return getter() if getter else [1., self.settings.zoom_factor]

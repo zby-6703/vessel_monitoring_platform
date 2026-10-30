@@ -427,6 +427,20 @@ img { display: block; max-width: 100%; }
 .recording-state.error { color: var(--danger); }
 .recording-state.error i { background: var(--danger); }
 .recording-controls-body { padding: 16px; }
+.target-filter-panel { margin-bottom: 18px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 3px; background: rgb(33 168 181 / 4%); }
+.target-filter-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.target-filter-heading strong { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
+.target-filter-heading p { margin: 6px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.65; }
+.target-filter-panel .recording-settings-grid { gap: 0 10px; }
+.target-filter-panel .setting-hint:last-child { margin-bottom: 5px; }
+.processing-summary { display: flex; flex-wrap: wrap; gap: 7px 13px; padding: 9px 0; border-block: 1px solid var(--border); color: var(--text-muted); font-size: 10px; }
+.processing-summary strong { margin-left: 4px; color: var(--primary-hover); font: 500 12px 'Fira Code', monospace; }
+.detection-box.lightweight-box { border-color: #87949e; border-style: dashed; opacity: .85; }
+.detection-box.lightweight-box::before, .detection-box.lightweight-box::after { border-color: #87949e; }
+.detection-box.lightweight-box span { background: #87949e; color: #071113; }
+.lightweight-target-reasons { list-style: none; margin: 0; padding: 9px 16px; border-top: 1px solid var(--border); background: rgb(135 148 158 / 4%); }
+.lightweight-target-reasons li { display: flex; align-items: baseline; gap: 8px 12px; justify-content: space-between; padding: 4px 0; color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.lightweight-target-reasons li > span:first-child { flex-shrink: 0; color: var(--text-secondary); }
 .recording-enable { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
 .recording-enable strong { font-size: 12px; font-weight: 500; }
 .recording-enable p { max-width: 255px; margin: 6px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.65; }

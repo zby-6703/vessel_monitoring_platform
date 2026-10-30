@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Camera, Check, Crosshair, HardDrive, RefreshCw, Save, Settings2, Video, ZoomIn } from 'lucide-vue-next'
 import { computed } from 'vue'
-import { cyclePhaseLabel, formatBytes, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
+import { cyclePhaseLabel, formatBytes, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
 
-const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local' }>()
+const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; processingSummary?: ProcessingSummary | null }>()
 const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'refresh-ptz': [] }>()
 function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettings[K]) {
   const next = { ...props.modelValue, [field]: value }
@@ -18,7 +18,8 @@ const optical = computed(() => props.modelValue.recording_mode === 'optical_cycl
 const magnifications = computed(() => (props.ptz?.magnifications || []).filter((factor) => factor > 1 && factor <= 40).sort((a, b) => a - b))
 const availableMagnifications = computed(() => magnifications.value.filter((factor) => factor >= props.modelValue.min_optical_zoom && factor <= props.modelValue.max_optical_zoom))
 const ready = computed(() => Boolean(props.ptz?.cycle_supported && (props.modelValue.adaptive_zoom_enabled ? availableMagnifications.value.length > 0 : magnifications.value.some((factor) => Math.abs(factor - props.modelValue.zoom_factor) < .001))))
-const blocked = computed(() => optical.value && props.modelValue.enabled && !ready.value)
+const roiValid = computed(() => props.modelValue.target_roi_left < props.modelValue.target_roi_right && props.modelValue.target_roi_top < props.modelValue.target_roi_bottom)
+const blocked = computed(() => !roiValid.value || optical.value && props.modelValue.enabled && !ready.value)
 const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
 const activeStep = computed(() => ({ overview: 0, initializing: 0, zooming_in: 1, zoomed: 2, zooming_out: 3, rearming: 4, error: -1 }[props.status?.phase || 'overview']))
 const stages = computed(() => ['1× 观察移动目标 / 近船优先', props.modelValue.adaptive_zoom_enabled ? '锁定目标 / 自适应放大' : '锁定目标 / 指定倍率', '目标船头至船尾经过', '目标离场 / 回 1×', '保存一段 / 重新选船'])
@@ -36,8 +37,35 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
 
 <template>
   <article class="panel recording-controls" :aria-busy="!loaded">
-    <header class="panel-header"><div><span class="section-kicker">检测 → 放大 → 回位 → 归档</span><h2><Video :size="16" />船舶循环录制</h2></div><span class="recording-state" :class="status?.state"><i></i>{{ stateLabel }}</span></header>
+    <header class="panel-header"><div><span class="section-kicker">检测 → 筛选 → 识别 / 录制</span><h2><Video :size="16" />目标筛选与循环录制</h2></div><span class="recording-state" :class="status?.state"><i></i>{{ stateLabel }}</span></header>
     <div class="recording-controls-body">
+      <section class="target-filter-panel" aria-label="重点船舶筛选与识别策略">
+        <div class="target-filter-heading"><div><strong>优先识别符合条件的大目标</strong><p>{{ modelValue.target_filter_enabled ? '小目标保留检测框与轨迹，跳过船名、吃水识别及录像触发。' : '筛选已关闭，恢复全部目标的完整识别流程。' }}</p></div><el-switch :model-value="modelValue.target_filter_enabled" :disabled="!loaded || saving" aria-label="启用重点船舶筛选" @update:model-value="set('target_filter_enabled', Boolean($event))" /></div>
+        <p class="setting-hint">筛选独立于录制开关，适用于现场摄像头和本地回放。仍对整幅画面运行船舶检测，减少的是后续识别开销；离线分析保持原流程。</p>
+        <div v-if="processingSummary" class="processing-summary" aria-label="当前画面处理分流"><span>检测 <strong>{{ processingSummary.detected }}</strong></span><span>入选 <strong>{{ processingSummary.eligible }}</strong></span><span>本帧完整识别 <strong>{{ processingSummary.detail_inferred }}</strong></span><span>轻量处理 <strong>{{ processingSummary.lightweight }}</strong></span></div>
+        <el-form v-if="modelValue.target_filter_enabled" label-position="top" class="recording-settings-grid">
+          <el-form-item label="入选最小船高 (1×画面 %)"><el-input-number :model-value="Number((modelValue.min_target_height_ratio * 100).toFixed(1))" :min="0" :max="80" :step="1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('min_target_height_ratio', Number($event) / 100)" /></el-form-item>
+          <el-form-item label="入选最小船宽 (1×画面 %)"><el-input-number :model-value="Number((modelValue.min_target_width_ratio * 100).toFixed(1))" :min="0" :max="100" :step="1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('min_target_width_ratio', Number($event) / 100)" /></el-form-item>
+          <el-form-item label="连续观测次数"><el-input-number :model-value="modelValue.target_confirm_hits" :min="1" :max="30" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_confirm_hits', Number($event))" /></el-form-item>
+          <el-form-item label="稳定观测时长 (秒)"><el-input-number :model-value="modelValue.target_confirm_seconds" :min="0" :max="10" :step=".1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_confirm_seconds', Number($event))" /></el-form-item>
+        </el-form>
+        <p v-if="modelValue.target_filter_enabled" class="setting-hint">尺寸统一换算到 1× 全景；船头刚入画、水平边缘截断时暂不要求船宽达标。画面尺寸仅近似船型，需按固定机位试调；“入选最小船高”与下方放大后的“目标船体画面高度”用途不同。</p>
+        <el-collapse class="recording-advanced">
+          <el-collapse-item name="processing-policy" title="监测区域与识别频率">
+            <p class="setting-hint">区域以 1× 全景为基准。仅筛选区域内目标，适合固定机位；改变摄像头朝向后需重新检查区域。</p>
+            <el-form label-position="top" class="recording-settings-grid">
+              <el-form-item label="区域左边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_left * 100)" :min="0" :max="99" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_left', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="区域右边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_right * 100)" :min="1" :max="100" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_right', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="区域上边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_top * 100)" :min="0" :max="99" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_top', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="区域下边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_bottom * 100)" :min="1" :max="100" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_bottom', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="同一目标识别间隔 (秒)"><el-input-number :model-value="modelValue.detail_interval_seconds" :min="0" :max="30" :step=".1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('detail_interval_seconds', Number($event))" /></el-form-item>
+              <el-form-item label="每帧最多完整识别目标"><el-input-number :model-value="modelValue.max_detail_targets" :min="1" :max="8" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('max_detail_targets', Number($event))" /></el-form-item>
+            </el-form>
+            <p v-if="!roiValid" class="recording-error" role="alert">区域左边界必须小于右边界，上边界必须小于下边界。</p>
+            <p class="setting-hint">多目标按优先级分配完整识别机会，间隔期间继续跟踪。停泊判断、运动证据和镜头视野限制仍参与录制选船。</p>
+          </el-collapse-item>
+        </el-collapse>
+      </section>
       <el-radio-group :model-value="modelValue.recording_mode" :disabled="!loaded || saving" class="focus-mode-options recording-mode-options" aria-label="录制工作模式" @update:model-value="set('recording_mode', $event as 'optical_cycle' | 'passage')"><el-radio-button value="optical_cycle">光学变焦循环</el-radio-button><el-radio-button value="passage">数字取景录制</el-radio-button></el-radio-group>
       <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? '观察并选择可录制的目标后开始，镜头缩回 1× 后保存为一个视频，再重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving || optical && !ready && !modelValue.enabled" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
       <p v-if="status?.error" class="recording-error" role="alert">{{ status.error }}</p>

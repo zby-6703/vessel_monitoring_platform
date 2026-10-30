@@ -30,7 +30,8 @@ from .database import ResultRepository, SessionLocal
 from .inference.frame_inference import FrameInferenceService
 from .inference.model_registry import ModelRegistry
 from .pipeline import Pipeline
-from .recording import recording_manager
+from .recording import RecordingSettings, recording_manager
+from .target_processing import RealtimeTargetProcessor
 from .schemas import TaskKind
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
@@ -171,6 +172,15 @@ class CameraCapture:
             elif not math.isfinite(fps) or fps < 1 or fps > 120:
                 fps = settings.live_capture_fps
             validate_recording_interval(frame_step, fps)
+            # Read the actual calibrated lens position without moving it. This
+            # also permits admission at a known zoom while recording is off.
+            context = recording_manager.zoom_observation_context()
+            if not recording_manager.optical_control_busy():
+                try:
+                    factor = onvif_control.read_magnification()
+                except Exception:
+                    factor = None
+                recording_manager.observe_zoom_factor(factor, context.get("generation"))
             with self.lock:
                 self._status["status"] = "running"
                 session = dict(self._status)
@@ -251,6 +261,7 @@ class CameraCapture:
         processed = 0
         last_detection_at = None
         last_generation = None
+        processor = RealtimeTargetProcessor()
         try:
             storage = ResultStorage(settings.result_root, f"live-{uuid.uuid4().hex}")
             source_name = settings.live_camera_name
@@ -267,27 +278,36 @@ class CameraCapture:
                     continue
                 infer_started = time.monotonic()
                 result = service.infer(image, task_id=session["session_id"], source_filename=source_name,
-                    task=TaskKind.FULL_PIPELINE, observed_at=observed_at, frame_index=source_index, source_frame_index=source_index)
+                    task=TaskKind.REGION_DETECTION, observed_at=observed_at, frame_index=source_index, source_frame_index=source_index)
                 ensure_detection_available(result)
-                detection_at = time.monotonic()
                 generation = observation_context.get("generation") if observation_context else None
                 if generation != last_generation:
                     last_detection_at = None
                     last_generation = generation
-                elapsed = detection_at - (last_detection_at if last_detection_at is not None else infer_started)
-                # A lens move deliberately changes the field of view. Those
-                # observations are tagged and cannot act as entry/exit evidence.
-                validate_recording_interval(session["frame_step"], session["fps"],
-                    inference_seconds=elapsed if not observation_context or observation_context.get("accept_detections") else None)
-                last_detection_at = detection_at
                 if self.stop_event.is_set():
                     break
                 tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
-                current, active_ids = {}, set()
                 for vessel in result.vessels:
                     match = Pipeline._best_track(vessel.ship.xyxy, tracks)
                     if match:
                         vessel.track_id = int(match.track_id)
+                context = observation_context
+                latest_context = recording_manager.zoom_observation_context()
+                if context and context.get("generation") != latest_context.get("generation"):
+                    context = {**context, "accept_detections": False}
+                processor.process(service, result, image, observed_at.timestamp(),
+                    RecordingSettings.model_validate(recording_manager.get_settings()), context)
+                detection_at = time.monotonic()
+                result.processing_ms = (detection_at - infer_started) * 1000
+                elapsed = detection_at - (last_detection_at if last_detection_at is not None else infer_started)
+                # Include admission and detailed models in the latency bound.
+                # Moving-lens samples cannot provide entry/exit evidence.
+                validate_recording_interval(session["frame_step"], session["fps"],
+                    inference_seconds=elapsed if not context or context.get("accept_detections") else None)
+                last_detection_at = detection_at
+                current, active_ids = {}, set()
+                for vessel in result.vessels:
+                    if vessel.track_id is not None:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 live = self.live_frame(result, session["camera_id"], current)
@@ -338,6 +358,26 @@ class OnvifControl:
 
     def available_magnifications(self) -> list[float]:
         return sorted(self._calibration(get_effective_settings()))
+
+    def read_magnification(self) -> float | None:
+        """Resolve a stationary native lens position to a measured zoom stop."""
+        settings = get_effective_settings()
+        if not self.configured(settings):
+            return None
+        calibration = self._calibration(settings)
+        position, movement, reported_space = self._read_zoom_status(settings)
+        if movement not in {None, "IDLE"}:
+            return None
+        options = self._zoom_options(settings)
+        self._validate_positions(calibration, options)
+        if reported_space and reported_space != options["space"]:
+            return None
+        # Do not guess between stops: an arbitrary native coordinate is not
+        # a known optical magnification. Match only an unambiguous calibration.
+        tolerance = settings.camera_onvif_zoom_tolerance * (options["max"] - options["min"])
+        matches = [factor for factor, native in calibration.items()
+                   if abs(native - position) <= tolerance]
+        return matches[0] if len(matches) == 1 else None
 
     @staticmethod
     def _calibration(settings: Settings) -> dict[float, float]:
@@ -532,7 +572,8 @@ class OnvifControl:
         response = {"configured": configured, "supported": False, "focus_supported": False,
                     "autofocus_supported": False, "focus_error": None,
                     "absolute_zoom_supported": False, "calibrated": False,
-                    "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None}
+                    "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None,
+                    "measured_zoom_factor": None}
         if not configured:
             response.update(error="未配置 ONVIF PTZ 服务及媒体 Profile Token", zoom_error="光学循环录制尚未配置摄像头")
             return response
@@ -555,10 +596,15 @@ class OnvifControl:
                 response["absolute_zoom_supported"] = True
                 calibration = self._calibration(settings)
                 self._validate_positions(calibration, options)
-                _, _, reported_space = self._parse_zoom_status(status)
+                position, movement, reported_space = self._parse_zoom_status(status)
                 if reported_space and reported_space != options["space"]:
                     raise ValueError("摄像头状态使用了不同的变焦坐标空间，无法核对倍率")
                 response.update(calibrated=True, magnifications=sorted(calibration), cycle_supported=True)
+                tolerance = settings.camera_onvif_zoom_tolerance * (options["max"] - options["min"])
+                matches = [factor for factor, native in calibration.items()
+                           if abs(native - position) <= tolerance]
+                if movement in {None, "IDLE"} and len(matches) == 1:
+                    response["measured_zoom_factor"] = matches[0]
             except Exception as exc:
                 response["zoom_error"] = safe_camera_error(exc, settings)
             return response

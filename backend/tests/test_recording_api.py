@@ -78,12 +78,42 @@ def test_settings_and_status_are_available_and_partial_settings_persist(recordin
     {"min_hits": 0},
     {"focus_mode": "invalid"},
     {"center_x": 2},
+    {"target_roi_left": .9, "target_roi_right": .2},
+    {"target_roi_top": .5, "target_roi_bottom": .5},
+    {"target_confirm_hits": 0},
+    {"max_detail_targets": 0},
+    {"detail_interval_seconds": -1},
 ])
 def test_invalid_settings_return_422_without_mutating_settings(recording_client, values):
     client, manager = recording_client
     original = manager.get_settings()
     assert client.put("/api/recording/settings", json=values).status_code == 422
     assert manager.get_settings() == original
+
+
+def test_target_filter_can_be_saved_with_recording_disabled_without_onvif(recording_client, monkeypatch):
+    client, manager = recording_client
+
+    class OfflineLens:
+        def validate_cycle(self, _factor):
+            raise AssertionError("saving detection policy must not contact an offline camera")
+
+        def available_magnifications(self):
+            raise AssertionError("disabled recording does not need zoom calibration")
+
+    manager.set_zoom_controller(OfflineLens())
+    values = {
+        "enabled": False, "target_filter_enabled": True,
+        "min_target_height_ratio": .08, "min_target_width_ratio": .15,
+        "target_confirm_hits": 4, "target_confirm_seconds": .6,
+        "target_roi_left": 0, "target_roi_top": .2,
+        "target_roi_right": 1, "target_roi_bottom": .9,
+        "detail_interval_seconds": 1.2, "max_detail_targets": 2,
+    }
+    saved = client.put("/api/recording/settings", json=values)
+    assert saved.status_code == 200
+    assert all(saved.json()[name] == value for name, value in values.items())
+    assert client.get("/api/recording/settings").json()["enabled"] is False
 
 
 def test_catalog_filters_media_ranges_and_delete(recording_client):

@@ -219,6 +219,8 @@ class ResultRepository:
     def save_video_instance(self, instance, result_uri: str) -> None:
         from .models import OfflineVideoResult
 
+        if instance.processing.get("lightweight_only"):
+            return
         with self.session_factory() as db:
             record = db.query(OfflineVideoResult).filter_by(video_filename=instance.source_filename, instance_id=instance.instance_id).one_or_none()
             geometry = resolve_vessel_geometry(db, instance.recognized_zh)

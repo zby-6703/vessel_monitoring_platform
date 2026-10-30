@@ -91,6 +91,7 @@ export interface OfflineJob {
 }
 export interface DashboardData { statistics: Statistics; records: RecordItem[] }
 export interface RealtimeResultItem {
+  lightweight_only?: boolean
   id: number; session_id: string; source_type: string; source_name: string | null; camera_id: string | null
   track_id: number | null; frame_index?: number; captured_at: string; start_time?: string
   ship_name: string; mmsi: string | null; draft_depth: number | null; status: string; confidence?: number | null
@@ -105,6 +106,17 @@ export interface ModelSettings {
 }
 
 export interface RecordingSettings {
+  target_filter_enabled: boolean
+  min_target_height_ratio: number
+  min_target_width_ratio: number
+  target_confirm_hits: number
+  target_confirm_seconds: number
+  target_roi_left: number
+  target_roi_top: number
+  target_roi_right: number
+  target_roi_bottom: number
+  detail_interval_seconds: number
+  max_detail_targets: number
   recording_mode: 'optical_cycle' | 'passage'
   enabled: boolean
   pre_roll_seconds: number
@@ -136,6 +148,10 @@ export interface RecordingSettings {
   target_acquire_timeout_seconds: number
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
+  target_filter_enabled: true, min_target_height_ratio: .06, min_target_width_ratio: .12,
+  target_confirm_hits: 3, target_confirm_seconds: .4,
+  target_roi_left: 0, target_roi_top: 0, target_roi_right: 1, target_roi_bottom: 1,
+  detail_interval_seconds: .8, max_detail_targets: 1,
   recording_mode: 'optical_cycle', enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 1,
   confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
   retention_days: 30, focus_mode: 'auto', zoom_factor: 3, center_x: .5, center_y: .5, padding: .2,
@@ -145,6 +161,20 @@ export const defaultRecordingSettings = (): RecordingSettings => ({
   motion_confirm_seconds: 1, target_switch_margin: .2,
   zoom_adjust_cooldown_seconds: 3, zoom_adjust_hysteresis: .15, target_acquire_timeout_seconds: 15,
 })
+export interface TargetProcessing {
+  eligible: boolean
+  reason: string
+  detail_inferred: boolean
+  height_ratio: number
+  width_ratio: number
+  motion_state?: string
+}
+export interface ProcessingSummary {
+  detected: number
+  eligible: number
+  detail_inferred: number
+  lightweight: number
+}
 export interface AdaptiveTarget {
   target_id: number | string
   ship_id?: number
@@ -167,7 +197,22 @@ export interface AdaptiveSelection {
 }
 export const targetMotionLabel = (state?: string) => ({ observing: '观测中', moving: '移动船舶', stationary: '停泊已排除' }[state || ''] || '待观测')
 const baseSelectionReasonLabel = (reason?: string) => ({ nearest_moving: '优先选择船框较高的移动目标', nearest: '按船框高度估计近船优先', observing_motion: '正在观察并确认船舶自身位移', stationary_excluded: '持续静止，已排除录制焦点', keep_target_hysteresis: '保留当前候选，避免相近目标来回切换', no_moving_target: '暂无已确认移动的目标，继续观察', adaptive_calibrated: '按船高选择安全的已标定光学档位', fixed_zoom: '采用已设置的固定光学倍率', already_large_enough: '船体已足够大，保留 1× 避免裁掉船体', no_safe_calibrated_zoom: '暂无安全的已标定放大档位，保留全景', off_axis_limited: '受目标竖直位置与视野边界限制，降低放大倍率', uncertain_background: '背景运动补偿尚不明确，暂缓停泊判定', no_eligible_target: '暂无可录制的移动目标', observing: '正在观察位移，暂不抢占录制', stationary: '持续静止，暂不作为录制焦点', no_calibrated_zoom: '设置范围内没有可用的已标定倍率', calibrated_limit: '已按可用标定档位限制倍率', target_locked: '本轮已锁定目标，不随其他船切换', motion_confirming: '正在确认船舶移动', no_vessels: '当前未检测到船体' }[reason || ''] || reason || '等待新的目标观测')
-const additionalSelectionReasons: Record<string, string> = { ambiguous_identity: '多船重叠，身份关联不明确，暂不抢占焦点' }
+const additionalSelectionReasons: Record<string, string> = {
+  ambiguous_identity: '多船重叠，身份关联不明确，继续观察',
+  small_target: '画面尺寸不足，仅检测与跟踪',
+  low_confidence: '检测置信度不足，仅检测与跟踪',
+  invalid_target: '船框无效，等待有效观测',
+  waiting_stability: '等待连续稳定检测',
+  outside_monitoring_area: '监测区域外，仅检测与跟踪',
+  lens_moving: '镜头运动中，暂缓完整识别',
+  zoom_unknown: '镜头倍率待确认，请检查光学能力或恢复已标定档位',
+  detail_cooldown: '目标已入选，等待下一次完整识别',
+  detail_budget: '目标已入选，本帧优先处理其他目标',
+  eligible: '符合重点识别条件',
+  filter_disabled: '目标筛选已关闭',
+  vertical_clipped: '船体竖直方向被裁切，继续观察',
+  stale_observation: '观测已过期，等待新画面',
+}
 export const selectionReasonLabel = (reason?: string) => additionalSelectionReasons[reason || ''] || baseSelectionReasonLabel(reason)
 export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'error'
 export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', error: '光学循环异常' }[phase || 'overview'])

@@ -144,6 +144,9 @@ class VesselFrameResult(BaseModel):
     draft: DraftObservation = Field(default_factory=DraftObservation)
     errors: list[str] = Field(default_factory=list)
 
+    # Realtime admission decision; empty for explicitly requested offline jobs.
+    processing: dict = Field(default_factory=dict)
+
 
 class FrameResultV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -161,6 +164,7 @@ class FrameResultV2(BaseModel):
     processing_ms: float = Field(ge=0)
     vessels: list[VesselFrameResult] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    processing_summary: dict = Field(default_factory=dict)
 
 
 class InstanceResultV2(BaseModel):
@@ -178,3 +182,4 @@ class InstanceResultV2(BaseModel):
     status: AttributeStatus = AttributeStatus.PENDING_REVIEW
     name_candidates: list[dict] = Field(default_factory=list)
     draft_statistics: dict = Field(default_factory=dict)
+    processing: dict = Field(default_factory=dict)

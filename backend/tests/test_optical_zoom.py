@@ -53,6 +53,31 @@ def mock_device(monkeypatch, control, positions=None, option_response=None):
     return calls
 
 
+@pytest.mark.parametrize("position,movement,expected", [(.1, "IDLE", 1), (.4, "IDLE", 3), (.25, "IDLE", None), (.4, "MOVING", None)])
+def test_read_magnification_uses_only_actual_calibrated_idle_positions(monkeypatch, optical_settings, position, movement, expected):
+    control = live_capture.OnvifControl()
+    calls = mock_device(monkeypatch, control, positions=[zoom_status(position, movement)])
+    assert control.read_magnification() == expected
+    assert all(action in {"GetStatus", "GetConfigurationOptions"} for action, _ in calls)
+
+
+def test_idle_zoom_measurement_cannot_overwrite_a_new_view_or_active_cycle(tmp_path):
+    from app.recording import RecordingManager
+    manager = RecordingManager(tmp_path)
+    context = manager.zoom_observation_context()
+    manager.observe_zoom_factor(3, context["generation"])
+    assert manager.current_zoom_factor == 3
+    manager.invalidate_zoom_observation()
+    manager.observe_zoom_factor(1, context["generation"])
+    assert manager.current_zoom_factor is None
+    manager._optical_session = True
+    manager.observe_zoom_factor(1)
+    assert manager.current_zoom_factor is None
+    manager._optical_session = False
+    manager.control_executor.shutdown(wait=True)
+    manager.executor.shutdown(wait=True)
+
+
 def test_calibrated_absolute_zoom_uses_real_native_positions_and_returns_to_measured_one_x(monkeypatch, optical_settings):
     control = live_capture.OnvifControl()
     calls = mock_device(monkeypatch, control, positions=[zoom_status(), zoom_status(.4), zoom_status(.4), zoom_status(.1)])

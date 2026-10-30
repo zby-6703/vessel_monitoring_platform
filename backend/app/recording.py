@@ -60,9 +60,23 @@ class RecordingSettings(BaseModel):
     center_x: float = Field(default=.5, ge=0, le=1)
     center_y: float = Field(default=.5, ge=0, le=1)
     padding: float = Field(default=.2, ge=0, le=1)
+    # Realtime inference admission is independent of the recording switch.
+    target_filter_enabled: bool = True
+    min_target_height_ratio: float = Field(default=.06, ge=0, le=.8)
+    min_target_width_ratio: float = Field(default=.12, ge=0, le=1)
+    target_confirm_hits: int = Field(default=3, ge=1, le=30)
+    target_confirm_seconds: float = Field(default=.4, ge=0, le=10)
+    target_roi_left: float = Field(default=0, ge=0, le=1)
+    target_roi_top: float = Field(default=0, ge=0, le=1)
+    target_roi_right: float = Field(default=1, ge=0, le=1)
+    target_roi_bottom: float = Field(default=1, ge=0, le=1)
+    detail_interval_seconds: float = Field(default=.8, ge=0, le=30)
+    max_detail_targets: int = Field(default=1, ge=1, le=8)
 
     @model_validator(mode="after")
     def validate_roll(self):
+        if self.target_roi_left >= self.target_roi_right or self.target_roi_top >= self.target_roi_bottom:
+            raise ValueError("监测区域左上坐标必须小于右下坐标")
         if self.min_optical_zoom > self.max_optical_zoom:
             raise ValueError("最小光学倍率不能大于最大倍率")
         if self.recording_mode == "optical_cycle" and self.zoom_factor <= 1:
@@ -285,7 +299,8 @@ class RecordingManager(OpticalCycleMixin):
             self.hits = 0
             self.first_seen = None
         if vessels is not None:
-            qualified = [v for v in vessels if float(v.get("confidence", 0)) >= self.settings.confidence_threshold and any(b.get("type") == "ship" for b in v.get("boxes", []))]
+            qualified = [v for v in vessels if v.get("processing", {}).get("eligible") is not False
+                and float(v.get("confidence", 0)) >= self.settings.confidence_threshold and any(b.get("type") == "ship" for b in v.get("boxes", []))]
             if qualified:
                 if not self.hits:
                     self.first_seen = timestamp

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import math
+import time
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -29,7 +30,8 @@ from .database import ResultRepository, SessionLocal, engine
 from .models import RealtimeTrackingResult, RealtimeVideoResult
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
-from .recording import recording_manager
+from .recording import RecordingSettings, recording_manager
+from .target_processing import RealtimeTargetProcessor
 from .live_capture import CameraCapture, onvif_control, safe_camera_error, ensure_detection_available, validate_recording_interval
 
 router = APIRouter()
@@ -117,7 +119,8 @@ def dashboard():
         trend.append({"time": hour.isoformat(), "traffic": len(items), "average_draft": round(sum(values) / len(values), 4) if values else None})
     displacements = [row.displacement for row in rows if row.displacement is not None]
     overload_alerts = sum(row.draft_depth_m > 4.6 for row in rows if row.draft_depth_m is not None)
-    return {"statistics": {"generated_at": now.isoformat(), "today_traffic": len(rows), "overload_alerts": overload_alerts, "average_draft": round(sum(drafts) / len(drafts), 4) if drafts else None, "average_displacement": round(sum(displacements) / len(displacements), 2) if displacements else None, "hourly": trend}, "records": [{"id": row.id, "captured_at": row.start_time.isoformat(), "track_id": row.instance_id, "camera_id": row.camera_id or "realtime", "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "displacement_tons": row.displacement, "review_status": row.status} for row in rows[:12]]}
+    detailed_rows = [row for row in rows if not (row.payload_json or {}).get("processing", {}).get("lightweight_only")]
+    return {"statistics": {"generated_at": now.isoformat(), "today_traffic": len(rows), "lightweight_traffic": len(rows) - len(detailed_rows), "overload_alerts": overload_alerts, "average_draft": round(sum(drafts) / len(drafts), 4) if drafts else None, "average_displacement": round(sum(displacements) / len(displacements), 2) if displacements else None, "hourly": trend}, "records": [{"id": row.id, "captured_at": row.start_time.isoformat(), "track_id": row.instance_id, "camera_id": row.camera_id or "realtime", "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "displacement_tons": row.displacement, "review_status": row.status} for row in detailed_rows[:12]]}
 
 
 @router.get("/api/realtime/results", tags=["realtime"])
@@ -130,13 +133,13 @@ def realtime_results(limit: int = 50):
     frame_items = []
     for row in frames:
         vessels = (row.payload_json or {}).get("vessels") or []
-        first = vessels[0] if vessels else {}
+        first = next((vessel for vessel in vessels if vessel.get("processing", {}).get("detail_inferred")), vessels[0] if vessels else {})
         draft = first.get("draft") or {}
         ship = first.get("ship") or {}
-        frame_items.append({"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": first.get("track_id") or first.get("vessel_id"), "frame_index": row.frame_index, "captured_at": row.observed_at.isoformat(), "ship_name": first.get("recognized_zh", "UNKNOWN"), "mmsi": None, "draft_depth": draft.get("depth_m"), "status": "pending_review", "confidence": ship.get("confidence"), "vessel_count": row.vessel_count})
+        frame_items.append({"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": first.get("track_id") or first.get("vessel_id"), "frame_index": row.frame_index, "captured_at": row.observed_at.isoformat(), "ship_name": first.get("recognized_zh", "UNKNOWN"), "mmsi": None, "draft_depth": draft.get("depth_m"), "status": "pending_review", "confidence": ship.get("confidence"), "vessel_count": row.vessel_count, "lightweight_only": bool(first.get("processing")) and not first["processing"].get("detail_inferred")})
     return {
         "frames": frame_items,
-        "instances": [{"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": row.instance_id, "captured_at": row.end_time.isoformat(), "start_time": row.start_time.isoformat(), "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "status": row.status} for row in instances],
+        "instances": [{"id": row.id, "session_id": row.session_id, "source_type": row.source_type, "source_name": row.source_name, "camera_id": row.camera_id, "track_id": row.instance_id, "captured_at": row.end_time.isoformat(), "start_time": row.start_time.isoformat(), "ship_name": row.recognized_zh, "mmsi": row.ais_mmsi, "draft_depth": row.draft_depth_m, "status": row.status, "lightweight_only": bool((row.payload_json or {}).get("processing", {}).get("lightweight_only"))} for row in instances],
     }
 
 
@@ -234,8 +237,8 @@ def _live_frame(result, camera_id: str, current_by_track: dict[int, dict]) -> di
         track_id = vessel.track_id or vessel.vessel_id
         current = current_by_track.get(track_id, {})
         status = current.get("current_status", "pending_review")
-        vessels.append({"ship_id": track_id, "ship_name": current.get("current_name", vessel.recognized_zh), "draft_depth_m": current.get("current_draft_depth_m", vessel.draft.depth_m), "current_status": getattr(status, "value", status), "confidence": vessel.ship.confidence, "boxes": boxes, "assets": {}})
-    return {"frame_timestamp": result.observed_at.isoformat(), "frame_id": result.frame_index or 0, "camera_id": camera_id, "source_width": result.image_width, "source_height": result.image_height, "processing_ms": result.processing_ms, "vessels": vessels}
+        vessels.append({"ship_id": track_id, "ship_name": current.get("current_name", vessel.recognized_zh), "draft_depth_m": current.get("current_draft_depth_m", vessel.draft.depth_m), "current_status": getattr(status, "value", status), "confidence": vessel.ship.confidence, "boxes": boxes, "assets": {}, "processing": vessel.processing})
+    return {"frame_timestamp": result.observed_at.isoformat(), "frame_id": result.frame_index or 0, "camera_id": camera_id, "source_width": result.image_width, "source_height": result.image_height, "processing_ms": result.processing_ms, "vessels": vessels, "processing_summary": result.processing_summary}
 
 
 def _video_timestamp(position_msec: float, frame_index: int, fps: float, previous: float | None) -> float:
@@ -320,6 +323,7 @@ class _LocalPlayback:
             aggregator = InstanceAggregator(storage.task_id, source_name, settings.track_confirm_hits, settings.track_lost_seconds, settings.track_finish_seconds)
             source_index = processed = 0
             source_timestamp = None
+            processor = RealtimeTargetProcessor()
             while not self.stop_event.is_set():
                 ok, image = capture.read()
                 if not ok:
@@ -330,16 +334,22 @@ class _LocalPlayback:
                         source_name=source_name, fps=fps, timestamp=source_timestamp, vessels=None)
                     source_index += 1
                     continue
-                result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.FULL_PIPELINE, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
+                infer_started = time.perf_counter()
+                result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.REGION_DETECTION, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
                 ensure_detection_available(result)
                 validate_recording_interval(step, fps)
                 tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
-                current = {}
-                active_ids = set()
                 for vessel in result.vessels:
                     match = Pipeline._best_track(vessel.ship.xyxy, tracks)
                     if match:
                         vessel.track_id = int(match.track_id)
+                processor.process(service, result, image, source_timestamp,
+                    RecordingSettings.model_validate(recording_manager.get_settings()))
+                result.processing_ms = (time.perf_counter() - infer_started) * 1000
+                current = {}
+                active_ids = set()
+                for vessel in result.vessels:
+                    if vessel.track_id is not None:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
@@ -449,7 +459,10 @@ def stop_camera():
 
 @router.get("/api/camera/ptz", tags=["realtime"])
 def camera_ptz_status():
-    return onvif_control.status()
+    context = recording_manager.zoom_observation_context()
+    response = onvif_control.status()
+    recording_manager.observe_zoom_factor(response.get("measured_zoom_factor"), context.get("generation"))
+    return response
 
 
 @router.post("/api/camera/ptz", tags=["realtime"])
@@ -460,6 +473,8 @@ def control_camera(body: PtzRequest):
                 raise ValueError("光学循环录制正在控制镜头，请先关闭录制或停止采集后再手动操作")
             onvif_control.cancel_move()
             recording_manager.fail("操作员停止镜头动作，光学录制循环已暂停")
+        if body.action in {"zoom_in", "zoom_out", "home", "stop"}:
+            recording_manager.invalidate_zoom_observation()
         return onvif_control.command(body.action)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

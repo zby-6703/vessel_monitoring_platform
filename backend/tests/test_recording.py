@@ -132,6 +132,63 @@ def test_settings_reject_invalid_recording_and_focus_values(values):
         RecordingSettings(**values)
 
 
+@pytest.mark.parametrize("values", [
+    {"target_roi_left": .8, "target_roi_right": .2},
+    {"target_roi_top": .8, "target_roi_bottom": .2},
+    {"target_roi_left": 1, "target_roi_right": 1},
+    {"target_roi_top": 0, "target_roi_bottom": 0},
+    {"target_roi_left": -.001},
+    {"target_roi_bottom": 1.001},
+    {"target_roi_left": float("nan")},
+    {"target_roi_top": float("inf")},
+    {"min_target_height_ratio": float("nan")},
+    {"detail_interval_seconds": float("inf")},
+])
+def test_target_filter_rejects_invalid_roi_and_nonfinite_values(values):
+    with pytest.raises(ValidationError):
+        RecordingSettings(**values)
+
+
+def test_target_filter_accepts_exact_full_image_boundaries():
+    settings = RecordingSettings(target_roi_left=0, target_roi_top=0,
+                                 target_roi_right=1, target_roi_bottom=1,
+                                 min_target_height_ratio=0, min_target_width_ratio=0)
+    assert settings.target_roi_left == 0
+    assert settings.target_roi_top == 0
+    assert settings.target_roi_right == 1
+    assert settings.target_roi_bottom == 1
+
+
+def test_passage_filter_blocks_entry_and_filtered_targets_do_not_extend_a_clip(tmp_path):
+    manager = enabled_manager(tmp_path, recording_mode="passage")
+    lightweight = vessel(name="小目标", track_id=2)
+    lightweight["processing"] = {"eligible": False, "reason": "small_target"}
+    priority = vessel(name="重点船", track_id=1)
+    priority["processing"] = {"eligible": True, "reason": "detail_cooldown", "detail_inferred": False}
+    feed(manager, 0, [lightweight])
+    assert manager.active is None
+    feed(manager, .1, [priority, lightweight])
+    assert manager.active is not None
+    item = manager.catalog[manager.active["id"]]
+    assert item["ship_names"] == ["重点船"]
+    assert item["track_ids"] == [1]
+    feed(manager, .2, [lightweight])
+    feed(manager, 1.2, [lightweight])
+    assert manager.active is None
+    assert len(manager.catalog) == 1
+
+
+@pytest.mark.parametrize("processing", [None, {}, {"eligible": True, "reason": "detail_budget"}])
+def test_passage_keeps_legacy_and_detail_deferred_targets_recordable(tmp_path, processing):
+    manager = enabled_manager(tmp_path, recording_mode="passage")
+    target = vessel()
+    if processing is not None:
+        target["processing"] = processing
+    feed(manager, 0, [target])
+    assert manager.active is not None
+    assert manager.catalog[manager.active["id"]]["track_ids"] == [1]
+
+
 def test_disabled_and_unconfirmed_detections_create_no_recordings(tmp_path: Path):
     manager = RecordingManager(tmp_path)
     feed(manager, 0, [vessel()])

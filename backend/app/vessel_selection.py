@@ -39,6 +39,7 @@ class _Target:
     vessel: dict = field(default_factory=dict)
     appearance: tuple | None = None
     reference_height: float = 0.
+    stable_height: float = 0.
     last_moving_at: float | None = None
 
 
@@ -88,7 +89,11 @@ class VesselTargetSelector:
         # Lens-only zoom is centred on the physical optical axis. A lower ship
         # must not silently disappear from the vertical field of view.
         edge = max(abs(box[1] - .5), abs(box[3] - .5), .001)
-        safe = max(1., 1 / (2 * edge))
+        # Keep waterline / deck detail off the image boundary. This margin is
+        # expressed in the resulting image, so it remains consistent at every
+        # calibrated magnification and does not depend on the current width of
+        # a partially entering bow.
+        safe = max(1., .47 / edge)
         limit = max(1., min(requested, settings.max_optical_zoom, safe))
         factors = sorted({float(f) for f in (calibrated_factors or [])
                           if isinstance(f, (int, float)) and math.isfinite(f) and f >= 1})
@@ -178,8 +183,9 @@ class VesselTargetSelector:
                 similarity = self.appearance_similarity(appearance, track.appearance)
                 if similarity is not None and similarity < .2:
                     continue
-                if .45 <= ratio <= 2.3 and (overlap >= .1 or distance <= .08):
-                    same_id = vessel.get("ship_id") == track.ship_id
+                same_id = vessel.get("ship_id") == track.ship_id
+                compatible_height = .45 <= ratio <= 2.3 or clipped and ratio < .45 and same_id and overlap >= .1
+                if compatible_height and (overlap >= .1 or distance <= .08):
                     pairs.append((overlap - distance * 2 + (.05 if same_id else 0) + (.3 * similarity if similarity is not None else 0), index, key))
         assigned, used = {}, set()
         for _, index, key in sorted(pairs, reverse=True):
@@ -251,19 +257,29 @@ class VesselTargetSelector:
                     mixed = .85 * np.asarray(track.appearance) + .15 * np.asarray(appearance)
                     track.appearance = tuple((mixed / max(1e-9, np.linalg.norm(mixed))).tolist())
             measured_height = box[3] - box[1]
-            if zoom_factor > 1 and track.heights:
-                source_box = self.detection_box(vessel, width, height)
-                if source_box and (source_box[1] <= .003 or source_box[3] >= .997):
-                    # A crop boundary provides only a lower bound on hull
-                    # height; it must never cause another zoom-in by shrinking
-                    # the estimate of an already clipped vessel.
-                    measured_height = max(measured_height, median(track.heights))
-            track.heights.append(measured_height)
-            track.reference_height = max(track.reference_height, median(track.heights))
-            eligible = (not settings.suppress_stationary or track.state == "moving" and reliable) and index not in ambiguous
-            reason = "ambiguous_identity" if index in ambiguous else "stationary_excluded" if track.state == "stationary" and settings.suppress_stationary else "uncertain_background" if not reliable else "observing_motion" if not eligible else "nearest_moving"
+            source_box = self.detection_box(vessel, width, height)
+            height_clipped = bool(source_box and (source_box[1] <= .003 or source_box[3] >= .997))
+            if height_clipped:
+                # A clipped observation is a lower bound, at 1x as well as
+                # after a lens move. Do not insert it into the full-height
+                # history: repeated clipping must not gradually drive another
+                # zoom-in. A larger lower bound still prompts a safe zoom-out.
+                track.stable_height = max(track.stable_height, measured_height)
+            else:
+                track.heights.append(measured_height)
+                # With only two observations median() averages both, allowing
+                # one bad second box to halve/double the initial estimate.
+                # Require a third sample before replacing that first estimate.
+                if not track.stable_height or len(track.heights) >= 3:
+                    track.stable_height = median(track.heights)
+            track.reference_height = max(track.reference_height, track.stable_height)
+            processing = vessel.get("processing") or {}
+            processing_allowed = processing.get("eligible") is not False
+            eligible = (not settings.suppress_stationary or track.state == "moving" and reliable) and index not in ambiguous and processing_allowed
+            reason = str(processing.get("reason") or "target_filtered") if not processing_allowed else "ambiguous_identity" if index in ambiguous else "stationary_excluded" if track.state == "stationary" and settings.suppress_stationary else "uncertain_background" if not reliable else "observing_motion" if not eligible else "nearest_moving"
             visible.append({"target_id": key, "ship_id": track.ship_id, "box": list(box),
-                            "height_ratio": median(track.heights), "motion_state": track.state,
+                            "height_ratio": track.stable_height, "height_clipped": height_clipped,
+                            "motion_state": track.state,
                             "stationary_seconds": round(track.still_seconds, 3), "eligible": eligible, "reason": reason,
                             "identity_ambiguous": index in ambiguous,
                             "vessel": dict(vessel)})

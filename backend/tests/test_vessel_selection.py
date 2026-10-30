@@ -239,3 +239,70 @@ def test_a_single_bbox_jump_followed_by_stability_does_not_unpark_a_vessel():
     for index in range(1, 9):
         result = update(selector, [ship(x=.235)], 4.5 + index * .5, config=config)
         assert result["selected"] is None
+
+
+@pytest.mark.parametrize("spike", [.11, .4])
+def test_second_height_observation_cannot_cause_extra_zoom_on_its_own(spike):
+    selector = VesselTargetSelector()
+    first = update(selector, [ship(height=.2)])
+    second = update(selector, [ship(height=spike)], .2)
+    third = update(selector, [ship(height=.2)], .4)
+    assert second["targets"][0]["target_id"] == first["targets"][0]["target_id"]
+    assert second["targets"][0]["height_ratio"] == pytest.approx(.2)
+    # The current vertical extent may conservatively request a reduction,
+    # but an isolated smaller box must never request a further zoom-in.
+    assert second["zoom_factor"] <= first["zoom_factor"]
+    assert third["zoom_factor"] == first["zoom_factor"]
+
+
+def test_repeated_vertical_clipping_does_not_shrink_the_known_hull_height():
+    selector = VesselTargetSelector()
+    first = update(selector, [ship(y=.3, height=.4)])
+    for index in range(1, 10):
+        result = update(selector, [ship(y=0, height=.7)], index * .2, zoom=3)
+        target = result["targets"][0]
+        assert target["target_id"] == first["targets"][0]["target_id"]
+        assert target["height_ratio"] == pytest.approx(.4)
+        assert target["height_clipped"] is True
+        assert result["requested_zoom_factor"] == pytest.approx(1.5)
+
+
+def test_one_x_vertical_clipping_is_also_only_a_lower_height_bound():
+    selector = VesselTargetSelector()
+    first = update(selector, [ship(y=.02, height=.4)])
+    for index in range(1, 10):
+        result = update(selector, [ship(y=0, height=.35)], index * .2)
+        target = result["targets"][0]
+        assert target["target_id"] == first["targets"][0]["target_id"]
+        assert target["height_ratio"] == pytest.approx(.4)
+
+
+def test_safe_zoom_reserves_vertical_margin_instead_of_touching_image_edge():
+    result = update(VesselTargetSelector(), [ship(y=.25, height=.2)])
+    assert result["requested_zoom_factor"] == pytest.approx(3)
+    assert result["max_safe_zoom"] == pytest.approx(1.88)
+    assert result["zoom_factor"] == 1
+    assert result["selection_reason"] == "off_axis_limited"
+
+
+def test_upstream_lightweight_target_never_outranks_an_eligible_vessel():
+    lightweight = ship(1, x=.05, height=.4)
+    lightweight["processing"] = {"eligible": False, "reason": "below_size_threshold"}
+    priority = ship(2, x=.65, height=.2)
+    priority["processing"] = {"eligible": True, "reason": "priority_target"}
+    result = update(VesselTargetSelector(), [lightweight, priority])
+    assert result["selected"]["ship_id"] == 2
+    assert target_for(result, 1)["eligible"] is False
+    assert target_for(result, 1)["reason"] == "below_size_threshold"
+    assert len(result["targets"]) == 2
+
+
+def test_filtered_target_stays_visible_for_an_existing_locked_cycle():
+    selector = VesselTargetSelector()
+    first = update(selector, [ship()])
+    filtered = ship(height=.19)
+    filtered["processing"] = {"eligible": False, "reason": "below_size_threshold"}
+    result = update(selector, [filtered], .2)
+    assert result["selected"] is None
+    assert result["targets"][0]["target_id"] == first["selected_target_id"]
+    assert result["targets"][0]["eligible"] is False

@@ -219,3 +219,18 @@ def test_approaching_locked_ship_reduces_zoom_after_cooldown_without_splitting_v
     assert item["optical_zoom_factor"] == 2
     assert item["ship_names"] == ["目标船"]
     assert len(harness.manager.catalog) == 1
+
+
+def test_new_entry_filter_does_not_end_a_locked_vessel_still_in_view(harness_factory):
+    harness = harness_factory()
+    harness.warm()
+    target = ship()
+    recording_id = harness.start([target])
+    visible = projected(target, 3)
+    visible["processing"] = {"eligible": False, "reason": "below_size_threshold"}
+    for _ in range(8):
+        state = harness.feed([visible], advance=.2)
+        assert state["active_id"] == recording_id
+        assert state["phase"] == "zoomed"
+    assert harness.lens.calls == [1, 3]
+    assert state["adaptive_selection"]["targets"][0]["eligible"] is False

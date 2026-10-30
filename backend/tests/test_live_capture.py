@@ -11,7 +11,7 @@ import pytest
 from app import api, live_capture
 from app.config import get_settings
 from app.main import app
-from app.schemas import FrameResultV2
+from app.schemas import FrameResultV2, TaskKind
 
 
 class FakeModels:
@@ -59,8 +59,14 @@ class FrameRecorder:
     def set_zoom_controller(self, _controller):
         pass
 
+    def optical_control_busy(self):
+        return False
+
+    def observe_zoom_factor(self, _factor, _generation=None):
+        pass
+
     def zoom_observation_context(self):
-        return {"generation": 0, "phase": "overview", "accept_detections": True}
+        return {"generation": 0, "phase": "overview", "accept_detections": True, "zoom_factor": 1.}
 
     def finish(self, reason):
         self.finishes.append(reason)
@@ -85,9 +91,16 @@ def test_local_video_records_skipped_inference_frames_at_source_fps(monkeypatch,
     writer.release()
     settings = replace(get_settings(), result_root=tmp_path / "results")
     recorder = FrameRecorder()
+    inference_tasks = []
+
+    class DetectionOnlyInference(EmptyInference):
+        def infer(self, image, **kwargs):
+            inference_tasks.append(kwargs["task"])
+            return super().infer(image, **kwargs)
+
     monkeypatch.setattr(api, "get_effective_settings", lambda: settings)
     monkeypatch.setattr(api, "ModelRegistry", FakeModels)
-    monkeypatch.setattr(api, "FrameInferenceService", EmptyInference)
+    monkeypatch.setattr(api, "FrameInferenceService", DetectionOnlyInference)
     monkeypatch.setattr(api, "ResultRepository", NullRepository)
     monkeypatch.setattr(api, "recording_manager", recorder)
     worker = api._LocalPlayback()
@@ -102,6 +115,7 @@ def test_local_video_records_skipped_inference_frames_at_source_fps(monkeypatch,
     assert [item["timestamp"] for item in recorder.frames] == pytest.approx([index / 6 for index in range(12)])
     assert all(item["fps"] == 6 and item["source_name"] == "original.mp4" for item in recorder.frames)
     assert [index for index, item in enumerate(recorder.frames) if item["vessels"] is not None] == [0, 4, 8]
+    assert inference_tasks == [TaskKind.REGION_DETECTION] * 3
     assert recorder.finishes == ["source_completed"]
 
 
@@ -111,10 +125,12 @@ def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path, 
                        live_capture_fps_override=override_fps, live_capture_fps=25)
     recorder = FrameRecorder()
     inference_calls = []
+    inference_tasks = []
 
     class SlowInference(EmptyInference):
         def infer(self, image, **kwargs):
             inference_calls.append(kwargs["frame_index"])
+            inference_tasks.append(kwargs["task"])
             time.sleep(.15)
             return super().infer(image, **kwargs)
 
@@ -158,6 +174,7 @@ def test_camera_capture_does_not_wait_for_slow_inference(monkeypatch, tmp_path, 
     asyncio.run(run())
     assert len(recorder.frames) == 30
     assert 1 <= len(inference_calls) < 30
+    assert inference_tasks == [TaskKind.REGION_DETECTION] * len(inference_calls)
     assert all(item["fps"] == expected_fps for item in recorder.frames)
     assert worker.snapshot()["status"] == "stopped"
     assert settings.live_capture_url not in str(worker.snapshot())
@@ -172,7 +189,7 @@ def test_camera_pairs_detection_with_context_from_before_capture_and_lens_transi
         generation = 0
 
         def zoom_observation_context(self):
-            return {"generation": self.generation, "phase": "overview", "accept_detections": True}
+            return {"generation": self.generation, "phase": "overview", "accept_detections": True, "zoom_factor": 1.}
 
         def process_frame(self, image, **kwargs):
             super().process_frame(image, **kwargs)

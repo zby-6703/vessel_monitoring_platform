@@ -85,6 +85,8 @@ class _Instance:
     started_at: datetime
     last_seen_at: datetime
     hits: int = 0
+    detail_hits: int = 0
+    lightweight_hits: int = 0
     state: InstanceState = InstanceState.TENTATIVE
     names: list[dict] = field(default_factory=list)
     drafts: list[dict] = field(default_factory=list)
@@ -108,14 +110,22 @@ class InstanceAggregator:
             assert_transition(instance.state, InstanceState.CONFIRMED, ALLOWED_INSTANCE_TRANSITIONS)
             instance.state = InstanceState.CONFIRMED
         instance.hits += 1
+        # Explicit offline requests have no admission metadata and retain the
+        # full-pipeline behavior. Realtime skipped frames never add OCR/draft
+        # votes, even if a caller happens to carry an earlier value forward.
+        detailed = not vessel.processing or vessel.processing.get("detail_inferred") is True
+        if detailed:
+            instance.detail_hits += 1
+        else:
+            instance.lightweight_hits += 1
         instance.last_seen_at = observed_at
         if instance.state is InstanceState.TENTATIVE and instance.hits >= self.confirm_hits:
             assert_transition(instance.state, InstanceState.CONFIRMED, ALLOWED_INSTANCE_TRANSITIONS)
             instance.state = InstanceState.CONFIRMED
-        if vessel.name_observation and vessel.name_observation.normalized:
+        if detailed and vessel.name_observation and vessel.name_observation.normalized:
             item = vessel.name_observation
             instance.names.append({"key": item.normalized, "text": item.text, "weight": item.roi_confidence * item.ocr_confidence, "seen_at": observed_at})
-        if vessel.draft.success and vessel.draft.depth_m is not None and any(region.label == "waterline_area" for region in vessel.regions):
+        if detailed and vessel.draft.success and vessel.draft.depth_m is not None and any(region.label == "waterline_area" for region in vessel.regions):
             instance.drafts.append({"depth_m": vessel.draft.depth_m, "weight": vessel.draft.roi_confidence * vessel.draft.character_confidence})
         return self.current(track_id)
 
@@ -144,7 +154,7 @@ class InstanceAggregator:
         name = fuse_name(instance.names)
         draft = fuse_draft(instance.drafts)
         status = AttributeStatus.CONFIRMED if name["status"] is AttributeStatus.CONFIRMED and draft["status"] is AttributeStatus.CONFIRMED else AttributeStatus.PENDING_REVIEW
-        return InstanceResultV2(task_id=self.task_id, source_filename=self.source_filename, instance_id=track_id, start_time=instance.started_at, end_time=observed_at, recognized_zh=name["recognized_zh"], recognized_en=name["recognized_en"], draft_depth_m=draft["draft_depth_m"], status=status, name_candidates=name["candidates"], draft_statistics=draft["statistics"])
+        return InstanceResultV2(task_id=self.task_id, source_filename=self.source_filename, instance_id=track_id, start_time=instance.started_at, end_time=observed_at, recognized_zh=name["recognized_zh"], recognized_en=name["recognized_en"], draft_depth_m=draft["draft_depth_m"], status=status, name_candidates=name["candidates"], draft_statistics=draft["statistics"], processing={"detail_observations": instance.detail_hits, "lightweight_only": instance.detail_hits == 0 and instance.lightweight_hits > 0})
 
     def finish(self, track_id: int, observed_at: datetime) -> InstanceResultV2:
         if track_id in self._finished:

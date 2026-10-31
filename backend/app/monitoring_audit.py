@@ -37,7 +37,7 @@ REASONS = frozenset({
     "storage_failed", "recording_error",
     "source_error", "writer_failed", "process_restarted", "storage_limit",
     "zoom_failed", "cycle_timeout",
-    "zoom_retry", "zoom_transport_failed", "zoom_recovered", "zoom_transport_fallback",
+    "zoom_retry", "zoom_transport_failed", "zoom_recovered", "zoom_transport_fallback", "target_evidence_timeout",
 })
 _ENUMS = {
     "recording_mode": frozenset({"optical_cycle", "passage"}),

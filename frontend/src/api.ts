@@ -219,6 +219,7 @@ export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = fals
 export interface RecordingStatus {
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null
+  media_recording?: boolean
   buffer_seconds: number
   error: string | null
   source_name: string | null
@@ -257,6 +258,8 @@ export interface RecordingItem {
   optical_zoom_factor?: number
   returned_to_overview?: boolean
   zoom_fallback?: boolean
+  media_end_reason?: string
+  tail_trimmed?: boolean
   error?: string | null
   zoom_factor?: number
   settings?: Partial<RecordingSettings>

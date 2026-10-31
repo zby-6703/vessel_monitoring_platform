@@ -26,6 +26,11 @@ class _Evidence:
     last_detail: float | None = None
     heights: deque = field(default_factory=lambda: deque(maxlen=5))
     widths: deque = field(default_factory=lambda: deque(maxlen=5))
+    last_box: tuple | None = None
+    entry_side: str | None = None
+    entry_complete: bool = False
+    entry_max_width: float = 0.
+    entry_growth_at: float = 0.
 
 
 class RealtimeTargetProcessor:
@@ -64,6 +69,18 @@ class RealtimeTargetProcessor:
     def _decision(reason, *, eligible=False, height=0., width=0., motion=None):
         return {"eligible": eligible, "reason": reason, "detail_inferred": False,
                 "height_ratio": height, "width_ratio": width, "motion_state": motion}
+
+    @staticmethod
+    def _same_entry_geometry(previous, current):
+        """An ID alone cannot transfer a bow-entry exemption to another hull."""
+        old_w, old_h = previous[2] - previous[0], previous[3] - previous[1]
+        new_w, new_h = current[2] - current[0], current[3] - current[1]
+        overlap_x = min(previous[2], current[2]) - max(previous[0], current[0])
+        overlap_y = min(previous[3], current[3]) - max(previous[1], current[1])
+        return (old_w > 0 and old_h > 0 and .65 <= new_h / old_h <= 1.6
+                and new_w >= old_w * .65
+                and overlap_x >= min(old_w, new_w) * .2
+                and overlap_y >= min(old_h, new_h) * .5)
 
     def _finish(self, result, started):
         decisions = [vessel.processing for vessel in result.vessels]
@@ -119,6 +136,8 @@ class RealtimeTargetProcessor:
                 # previously measured full hull became physically smaller.
                 # An unknown/manual view cannot make the same guarantee.
                 evidence.lens_interrupted = reason == "lens_moving"
+                evidence.entry_side = None
+                evidence.entry_complete = True
                 if reason != "lens_moving":
                     evidence.qualified = False
             for vessel in result.vessels:
@@ -154,6 +173,16 @@ class RealtimeTargetProcessor:
             continuous = evidence is not None and evidence.serial == self._serial - 1 and 0 < timestamp - evidence.last_seen <= self.selector.MAX_OBSERVATION_GAP
             if evidence is None:
                 evidence = self.evidence[key] = _Evidence(timestamp, self._serial, timestamp)
+            gap = timestamp - evidence.last_seen
+            if gap > self.selector.MAX_OBSERVATION_GAP:
+                # Treat a true identity gap as a new arrival, never as a
+                # continuing partial hull based on a recycled upstream ID.
+                evidence.last_box = None
+                evidence.entry_side = None
+                evidence.entry_complete = False
+            elif evidence.last_box is not None and not self._same_entry_geometry(evidence.last_box, box):
+                evidence.entry_side = None
+                evidence.entry_complete = True
             if not continuous:
                 preserve_geometry = (evidence.lens_interrupted and evidence.qualified
                     and timestamp - evidence.last_seen <= max(30., settings.zoom_settle_timeout_seconds + 2)
@@ -177,10 +206,33 @@ class RealtimeTargetProcessor:
                 evidence.widths.append(box[2] - box[0])
             stable_height = median(evidence.heights)
             stable_width = median(evidence.widths)
+            if zoom != 1:
+                evidence.entry_side = None
+                evidence.entry_complete = True
+            elif (evidence.last_box is None and not evidence.entry_complete and horizontal_clipped):
+                evidence.entry_side = "left" if source_box[0] <= .003 else "right"
+                evidence.entry_max_width = box[2] - box[0]
+                evidence.entry_growth_at = timestamp
+            if evidence.entry_side is not None:
+                measured_width = box[2] - box[0]
+                if measured_width >= evidence.entry_max_width + .001:
+                    evidence.entry_max_width = measured_width
+                    evidence.entry_growth_at = timestamp
+                # A bow may move a few pixels off the boundary before motion
+                # and detection confirmation finish. Keep its established
+                # exemption while the visible hull continues to grow, rather
+                # than waiting for the full-width threshold again. A narrow
+                # fully visible boat must not keep that exemption indefinitely.
+                idle_limit = max(1.5, settings.target_confirm_seconds + settings.motion_confirm_seconds + .5)
+                if (stable_width >= settings.min_target_width_ratio
+                        or timestamp - evidence.entry_growth_at > idle_limit):
+                    evidence.entry_side = None
+                    evidence.entry_complete = True
+            evidence.last_box = box
             evidence.last_seen, evidence.serial = timestamp, self._serial
             factor = .8 if evidence.qualified else 1.
             height_ok = stable_height >= settings.min_target_height_ratio * factor
-            horizontal_entry = zoom == 1 and horizontal_clipped
+            horizontal_entry = zoom == 1 and evidence.entry_side is not None
             width_ok = horizontal_entry or stable_width >= settings.min_target_width_ratio * factor
             cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
             inside = settings.target_roi_left <= cx <= settings.target_roi_right and settings.target_roi_top <= cy <= settings.target_roi_bottom
@@ -206,6 +258,7 @@ class RealtimeTargetProcessor:
                 width=stable_width, motion=target["motion_state"])
             vessel.processing["target_id"] = key
             vessel.processing["hits"] = evidence.hits
+            vessel.processing["horizontal_entry_exemption"] = horizontal_entry
             if reason == "eligible":
                 if evidence.last_detail is not None and timestamp - evidence.last_detail + self.TIME_EPSILON < settings.detail_interval_seconds:
                     vessel.processing["reason"] = "detail_cooldown"

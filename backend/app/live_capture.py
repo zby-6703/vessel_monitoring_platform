@@ -88,7 +88,7 @@ def validate_recording_interval(frame_step: int, fps: float, *, inference_second
 
 
 class CameraCapture:
-    ZOOM_OBSERVATION_INTERVAL = 5.
+    ZOOM_OBSERVATION_INTERVAL = 2.
     ZOOM_OBSERVATION_JOIN_TIMEOUT = .5
     RECONNECT_INITIAL_SECONDS = 5.
     RECONNECT_MAX_SECONDS = 30.
@@ -232,10 +232,21 @@ class CameraCapture:
             if self.stop_event.is_set():
                 return None, "source_stopped"
             service = FrameInferenceService(models)
+            # Open the control connection before video can occupy the remote
+            # tunnel. This is one bounded, read-only request, never a lens move.
+            if self._zoom_configured(settings):
+                try:
+                    onvif_control.keep_control_alive(settings)
+                except Exception:
+                    pass
+            if self.stop_event.is_set() or self._shutdown_requested.is_set():
+                return None, "source_stopped"
             failure_reason = "camera_connection_failed"
             capture = cv2.VideoCapture()
             opened = capture.open(settings.live_capture_url, cv2.CAP_FFMPEG, [
-                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
+                # Lower-rate HD streams can keep a long GOP (e.g. 50 frames
+                # at 8 fps). Allow its next keyframe without reconnect churn.
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000])
             if not opened:
                 raise RuntimeError("无法连接摄像头视频源，请检查地址、账号、网络和编码格式")
             failure_reason = "capture_failed"
@@ -335,14 +346,28 @@ class CameraCapture:
             self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
         return failure, failure_reason if failure else "source_stopped"
 
+    @staticmethod
+    def _zoom_configured(settings: Settings) -> bool:
+        return bool(settings.camera_onvif_ptz_url and settings.camera_onvif_profile_token
+                    and settings.camera_onvif_zoom_calibration)
+
     def _observe_zoom(self, settings: Settings, stopped: threading.Event) -> None:
         """Refresh calibrated idle magnification without owning lens movement."""
-        configured = bool(settings.camera_onvif_ptz_url and settings.camera_onvif_profile_token
-                          and settings.camera_onvif_zoom_calibration)
+        configured = self._zoom_configured(settings)
         last_observation = object()
         while not stopped.is_set() and not self.stop_event.is_set():
-            if not recording_manager.optical_control_busy():
-                context = recording_manager.zoom_observation_context()
+            context = recording_manager.zoom_observation_context()
+            busy = recording_manager.optical_control_busy()
+            if (configured and busy and context.get("phase") in {"overview", "zoomed"}
+                    and context.get("accept_detections") is True):
+                # The optical session owns the position, even while waiting
+                # for a ship. Keep its authenticated TCP connection warm but
+                # never replace its position or change its generation.
+                try:
+                    onvif_control.keep_control_alive(settings)
+                except Exception:
+                    pass
+            elif not busy:
                 factor = None
                 reason = "zoom_unknown"
                 if configured:
@@ -496,6 +521,17 @@ class OnvifControl:
 
     def available_magnifications(self) -> list[float]:
         return sorted(self._calibration(get_effective_settings()))
+
+    def keep_control_alive(self, settings: Settings | None = None) -> bool:
+        """Send one read-only status request without queuing behind motor I/O."""
+        settings = settings or get_effective_settings()
+        if not self.configured(settings) or not self._http_lock.acquire(blocking=False):
+            return False
+        try:
+            self._read_zoom_status(settings)
+            return True
+        finally:
+            self._http_lock.release()
 
     def read_magnification(self) -> float | None:
         """Resolve a stationary native lens position to a measured zoom stop."""
@@ -690,7 +726,8 @@ class OnvifControl:
             if self._http_client_key != key or self._http_client is None:
                 self._close_http_client()
                 auth = httpx.DigestAuth(settings.camera_onvif_username, settings.camera_onvif_password) if settings.camera_onvif_username else None
-                self._http_client = httpx.Client(timeout=5, auth=auth, follow_redirects=False, trust_env=False)
+                self._http_client = httpx.Client(timeout=5, auth=auth, follow_redirects=False, trust_env=False,
+                    limits=httpx.Limits(keepalive_expiry=30))
                 self._http_client_key = key
             try:
                 response = self._http_client.post(endpoint, content=envelope.encode(), headers={

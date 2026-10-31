@@ -237,7 +237,7 @@ def _live_frame(result, camera_id: str, current_by_track: dict[int, dict]) -> di
         track_id = vessel.track_id or vessel.vessel_id
         current = current_by_track.get(track_id, {})
         status = current.get("current_status", "pending_review")
-        vessels.append({"ship_id": track_id, "ship_name": current.get("current_name", vessel.recognized_zh), "draft_depth_m": current.get("current_draft_depth_m", vessel.draft.depth_m), "current_status": getattr(status, "value", status), "confidence": vessel.ship.confidence, "boxes": boxes, "assets": {}, "processing": vessel.processing})
+        vessels.append({"ship_id": track_id, "tracked": vessel.track_id is not None, "ship_name": current.get("current_name", vessel.recognized_zh), "draft_depth_m": current.get("current_draft_depth_m", vessel.draft.depth_m), "current_status": getattr(status, "value", status), "confidence": vessel.ship.confidence, "boxes": boxes, "assets": {}, "processing": vessel.processing})
     return {"frame_timestamp": result.observed_at.isoformat(), "frame_id": result.frame_index or 0, "camera_id": camera_id, "source_width": result.image_width, "source_height": result.image_height, "processing_ms": result.processing_ms, "vessels": vessels, "processing_summary": result.processing_summary}
 
 

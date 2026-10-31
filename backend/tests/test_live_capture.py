@@ -14,6 +14,11 @@ from app.main import app
 from app.schemas import FrameResultV2, TaskKind
 
 
+@pytest.fixture(autouse=True)
+def no_real_control_keepalive(monkeypatch):
+    monkeypatch.setattr(live_capture.onvif_control, "keep_control_alive", lambda *_args: True)
+
+
 class FakeModels:
     def __init__(self, settings):
         self.settings = settings
@@ -367,7 +372,7 @@ def test_zoom_observer_retries_unknown_or_failed_measurement_without_assuming_on
     ticks = PollSteps(2)
     worker._observe_zoom(observer_settings(), ticks)
     assert recorder.observations == [None, 3.]
-    assert ticks.waits == [5., 5.]
+    assert ticks.waits == [2., 2.]
 
 
 def test_zoom_observer_skips_an_owned_cycle_and_resumes_after_it_is_idle(monkeypatch):
@@ -381,6 +386,70 @@ def test_zoom_observer_skips_an_owned_cycle_and_resumes_after_it_is_idle(monkeyp
     worker._observe_zoom(observer_settings(), ticks)
     assert calls == [True]
     assert recorder.observations == [2.]
+
+
+@pytest.mark.parametrize("phase", ["overview", "zoomed"])
+def test_stable_owned_view_keeps_control_connection_warm_without_overwriting_position(monkeypatch, phase):
+    recorder = ObserverRecorder()
+    recorder.busy = True
+    context = {"generation": 7, "phase": phase, "accept_detections": True, "zoom_factor": 3.}
+    recorder.zoom_observation_context = lambda: dict(context)
+    calls = []
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "keep_control_alive", lambda settings: calls.append(settings) or True)
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", lambda: pytest.fail("owned lens must not be relabelled"))
+    worker = live_capture.CameraCapture(None, None)
+    ticks = PollSteps(3)
+    worker._observe_zoom(observer_settings(), ticks)
+    assert len(calls) == 3
+    assert ticks.waits == [2., 2., 2.]
+    assert recorder.observations == []
+    assert context == {"generation": 7, "phase": phase, "accept_detections": True, "zoom_factor": 3.}
+
+
+@pytest.mark.parametrize("phase", ["initializing", "zooming_in", "zooming_out", "recovering"])
+def test_observer_does_not_queue_keepalive_during_a_lens_transition(monkeypatch, phase):
+    recorder = ObserverRecorder()
+    recorder.busy = True
+    recorder.zoom_observation_context = lambda: {"generation": 8, "phase": phase, "accept_detections": False}
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "keep_control_alive", lambda *_args: pytest.fail("lens transition owns I/O"))
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", lambda: pytest.fail("lens transition owns view"))
+    live_capture.CameraCapture(None, None)._observe_zoom(observer_settings(), PollSteps(2))
+    assert recorder.observations == []
+
+
+@pytest.mark.parametrize("warm_result", ["success", "failure", "stop"])
+def test_camera_attempt_warms_control_before_opening_video_and_honors_stop(monkeypatch, tmp_path, warm_result):
+    settings = replace(observer_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://camera/stream")
+    worker = live_capture.CameraCapture(None, None)
+    recorder = FrameRecorder()
+    events = []
+    def warm(_settings):
+        events.append("warm")
+        if warm_result == "failure":
+            raise TimeoutError("simulated preflight timeout")
+        if warm_result == "stop":
+            worker.stop()
+        return True
+    class Camera:
+        def open(self, *_args): events.append("open"); return True
+        def get(self, *_args): return 25
+        def read(self): worker.stop_event.set(); return False, None
+        def release(self): events.append("release")
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture, "FrameInferenceService", EmptyInference)
+    monkeypatch.setattr(live_capture.onvif_control, "keep_control_alive", warm)
+    monkeypatch.setattr(live_capture.cv2, "VideoCapture", Camera)
+    monkeypatch.setattr(worker, "_observe_zoom", lambda *_args: None)
+    monkeypatch.setattr(worker, "_infer_loop", lambda *_args: None)
+    monkeypatch.setattr(worker, "_publish", lambda *_args: None)
+    failure, reason = worker._run_attempt(settings, None, 3, FakeModels(settings))
+    assert failure is None and reason == "source_stopped"
+    if warm_result == "stop":
+        assert events == ["warm"]
+    else:
+        assert events == ["warm", "open", "release"]
 
 
 @pytest.mark.parametrize("change", ["cycle", "generation", "stop"])

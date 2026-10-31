@@ -1,5 +1,6 @@
 from dataclasses import replace
 import asyncio
+import threading
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -28,13 +29,15 @@ def transport(monkeypatch):
         assert kwargs["timeout"] == 5
         assert kwargs["trust_env"] is False
         assert kwargs["follow_redirects"] is False
+        assert kwargs["limits"].keepalive_expiry == 30
         assert isinstance(kwargs["auth"], httpx.DigestAuth)
         client = original(transport=httpx.MockTransport(handle), **kwargs)
         clients.append(client)
         return client
     monkeypatch.setattr(live_capture.httpx, "Client", factory)
     settings = replace(get_settings(), camera_onvif_ptz_url="http://camera/ptz",
-        camera_onvif_imaging_url="http://camera/imaging", camera_onvif_username="user", camera_onvif_password="private-password")
+        camera_onvif_imaging_url="http://camera/imaging", camera_onvif_profile_token="profile",
+        camera_onvif_username="user", camera_onvif_password="private-password")
     yield settings, clients, requests, state
     for client in clients:
         client.close()
@@ -67,6 +70,39 @@ def test_transport_failure_discards_client_before_next_request(transport):
     control._request(settings, control.PTZ, "GetStatus", "")
     assert len(clients) == 2
     control.close()
+
+
+def test_keepalive_only_reads_status_and_reuses_the_authenticated_connection(transport):
+    settings, clients, requests, _ = transport
+    control = live_capture.OnvifControl()
+    # No native position is needed for keep-warm: it must still require the
+    # camera's actual status response, and it must never move a lens.
+    control._parse_zoom_status = lambda document: (.1, "IDLE", None)
+    assert control.keep_control_alive(settings) is True
+    assert control.keep_control_alive(settings) is True
+    assert len(clients) == 1 and len(requests) == 2
+    assert all(b"GetStatus" in request.content and b"AbsoluteMove" not in request.content for request in requests)
+    control.close()
+
+
+def test_keepalive_does_not_queue_behind_an_inflight_control_request(transport):
+    settings, _, requests, _ = transport
+    control = live_capture.OnvifControl()
+    entered, release = threading.Event(), threading.Event()
+    def hold():
+        with control._http_lock:
+            entered.set()
+            assert release.wait(2)
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert entered.wait(1)
+        assert control.keep_control_alive(settings) is False
+        assert requests == []
+    finally:
+        release.set()
+        thread.join(2)
+        control.close()
 
 
 @pytest.mark.parametrize("changes", [{"camera_onvif_password": "changed-password"}, {"camera_onvif_ptz_url": "http://camera/new-ptz"}])

@@ -6,9 +6,12 @@ capture keeps writing the actual camera frames while the lens is moving.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 import math
 import time
 import httpx
+import cv2
+import numpy as np
 
 from .vessel_selection import VesselTargetSelector
 from .scene_motion import BackgroundMotionEstimator
@@ -16,6 +19,8 @@ from .monitoring_audit import record_event
 
 
 class OpticalCycleMixin:
+    TARGET_EVIDENCE_GRACE_SECONDS = 5.
+
     def _initialize_optical_cycle(self):
         self.control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="optical-zoom")
         self.zoom_controller = None
@@ -49,6 +54,126 @@ class OpticalCycleMixin:
         self._last_zoom_adjust = None
         self._locked_appearance = None
         self._initial_target_height = None
+        self._media_pending = deque()
+        self._media_pending_bytes = 0
+        self._media_last_target = None
+        self._media_target_box = None
+        self._closed_cycle_id = None
+        self._closed_cycle_pending = False
+
+    @staticmethod
+    def _source_target_box(vessel, width, height):
+        """Image-plane coordinates only; this never assumes a physical zoom."""
+        try:
+            for box in vessel.get("boxes", []):
+                if box.get("type") != "ship":
+                    continue
+                x, y, w, h = [float(value) for value in box["xywh"]]
+                if all(math.isfinite(value) for value in (x, y, w, h)) and w > 0 and h > 0:
+                    clipped = (min(1., max(0., x / width)), min(1., max(0., y / height)),
+                               max(0., min(1., (x + w) / width)), max(0., min(1., (y + h) / height)))
+                    if clipped[2] > clipped[0] and clipped[3] > clipped[1]:
+                        return clipped
+        except (ValueError, TypeError, KeyError, ZeroDivisionError):
+            pass
+        return None
+
+    def _queue_optical_media(self, image, timestamp):
+        if not self.active or self.active.get("media_stopped"):
+            return
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            raise RuntimeError("无法缓存录像尾部帧")
+        data = encoded.tobytes()
+        self._media_pending.append((timestamp, data))
+        self._media_pending_bytes += len(data)
+        while self._media_pending and self._media_pending_bytes > self.BUFFER_BYTES:
+            _, discarded = self._media_pending.popleft()
+            self._media_pending_bytes -= len(discarded)
+
+    def _flush_optical_media(self, through):
+        while self._media_pending and self._media_pending[0][0] <= through:
+            timestamp, data = self._media_pending.popleft()
+            self._media_pending_bytes -= len(data)
+            image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is not None:
+                self._write_frame(image, timestamp)
+
+    def _clear_optical_media(self):
+        self._media_pending.clear()
+        self._media_pending_bytes = 0
+
+    def _observe_media_target(self, vessel, image, timestamp):
+        self._media_last_target = timestamp
+        self._media_target_box = self._source_target_box(vessel, image.shape[1], image.shape[0])
+        self._flush_optical_media(timestamp)
+
+    def _positive_unconfirmed_target(self, image, vessels, observation_context):
+        # Moving/unknown lens views cannot prove an empty scene. Fresh positive
+        # tracker + image-plane evidence can still retain a visible target.
+        if not self.locked_target or vessels is None:
+            return None
+        if observation_context is not None and (observation_context.get("generation") != self._cycle_generation
+                or observation_context.get("phase") != self.phase):
+            return None
+        policy = self._cycle_policy or self.settings
+        for vessel in vessels:
+            if vessel.get("tracked") is False:
+                continue
+            if vessel.get("ship_id") != self.locked_target.get("ship_id"):
+                continue
+            if float(vessel.get("confidence", 0)) < policy.confidence_threshold:
+                continue
+            if (vessel.get("processing") or {}).get("reason") == "ambiguous_identity":
+                continue
+            box = self._source_target_box(vessel, image.shape[1], image.shape[0])
+            previous = self._media_target_box
+            if box is None or previous is None:
+                continue
+            old_h, new_h = previous[3] - previous[1], box[3] - box[1]
+            old_w, new_w = previous[2] - previous[0], box[2] - box[0]
+            old_c = ((previous[0] + previous[2]) / 2, (previous[1] + previous[3]) / 2)
+            new_c = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            if not (.2 <= new_h / max(old_h, .001) <= 5 and .1 <= new_w / max(old_w, .001) <= 10
+                    and math.dist(old_c, new_c) <= max(.2, old_w * .8, old_h * .8)):
+                continue
+            appearance = self.target_selector.appearance_for(image, vessel)
+            similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
+            if similarity is not None and similarity < .3:
+                continue
+            return vessel
+        return None
+
+    def _seal_optical_media(self, cutoff, reason):
+        clip = self.active
+        if not clip or clip.get("media_stopped"):
+            return
+        self._flush_optical_media(cutoff)
+        self._clear_optical_media()
+        clip["writer"].close()
+        clip["media_stopped"] = True
+        self.catalog[clip["id"]]["media_end_reason"] = reason
+
+    def _end_unknown_media(self, policy):
+        cutoff = self._media_last_target + policy.departure_confirm_seconds
+        self._seal_optical_media(cutoff, "target_evidence_timeout")
+        if self.active:
+            self.catalog[self.active["id"]].update(zoom_fallback=True,
+                target_last_seen_seconds=self._media_last_target)
+            self._finalize_sealed_optical_media("target_evidence_timeout")
+
+    def _finalize_sealed_optical_media(self, reason):
+        if self.active and self.active.get("media_stopped"):
+            self._closed_cycle_id = self.active["id"]
+            self._closed_cycle_pending = True
+            self._finish(reason)
+
+    def _mark_closed_cycle_returned(self):
+        if self._closed_cycle_id and self._closed_cycle_id in self.catalog:
+            from .recording import _atomic_json
+            item = self.catalog[self._closed_cycle_id]
+            item["returned_to_overview"] = True
+            _atomic_json(self.root / self._closed_cycle_id / "manifest.json", item)
 
     def set_zoom_controller(self, controller):
         with self.lock:
@@ -130,8 +255,9 @@ class OpticalCycleMixin:
             self._zoomed_ship_seen = False
 
     def _zoom_event(self, target, settled):
-        if self.active:
-            self.catalog[self.active["id"]].setdefault("zoom_events", []).append({
+        recording_id = self.active["id"] if self.active else self._closed_cycle_id
+        if recording_id and recording_id in self.catalog:
+            self.catalog[recording_id].setdefault("zoom_events", []).append({
                 "source_seconds": self.last_timestamp, "factor": target, "settled": settled})
 
     def _command_zoom(self, target: float, phase: str, *, retry: bool = False):
@@ -157,15 +283,16 @@ class OpticalCycleMixin:
             item = self.catalog[self.active["id"]]
             item.update(zoom_fallback=True, zoom_failure_kind="transport", last_failed_zoom_factor=failed_target)
             item.setdefault("failed_zoom_factor", failed_target)
+            self._finalize_sealed_optical_media("zoom_transport_fallback")
         self._phase("recovering")
         if self._zoom_recovery_attempts >= 4:
             self._zoom_recovery_due = None
-            self.error = "镜头网络请求持续失败，自动变焦已暂停；本轮原视频继续保留至时长上限"
+            self.error = "镜头网络请求持续失败，自动变焦已暂停；录像仅保留目标有证据出现的部分"
             self._phase("error")
             return
         delay = min(30., 5. * 2 ** self._zoom_recovery_attempts)
         self._zoom_recovery_due = time.monotonic() + delay
-        self.error = "镜头网络请求失败，正在保留原视频并重试恢复 1×，尚未确认镜头位置"
+        self.error = "镜头网络请求失败，正在按目标可见证据保留原视频并恢复 1×，尚未确认镜头位置"
         record_event("optical_phase", phase="recovering", reason="zoom_transport_failed")
 
     def _recover_zoom_if_due(self):
@@ -181,10 +308,11 @@ class OpticalCycleMixin:
         self.error = None
         self._zoom_recovery_due = None
         record_event("optical_phase", phase="recovering", zoom_factor=1., reason="zoom_recovered")
+        self._mark_closed_cycle_returned()
         if self.active:
             self.catalog[self.active["id"]]["returned_to_overview"] = True
             self._active_zoom_factor = 1.
-            self._phase("zoomed")
+            self._phase("rearming" if self.active.get("media_stopped") else "zoomed")
         else:
             self._phase("rearming")
 
@@ -253,6 +381,7 @@ class OpticalCycleMixin:
                 self._active_zoom_factor = target
                 self._phase("zoomed")
             elif target == 1:
+                self._mark_closed_cycle_returned()
                 if self.active:
                     self.catalog[self.active["id"]]["returned_to_overview"] = True
                 if self._cycle_halt or self._cycle_no_more_frames:
@@ -310,6 +439,11 @@ class OpticalCycleMixin:
         self._active_zoom_factor = None
         self._locked_appearance = None
         self._initial_target_height = None
+        self._clear_optical_media()
+        self._media_last_target = None
+        self._media_target_box = None
+        self._closed_cycle_id = None
+        self._closed_cycle_pending = False
         self._zoom_recovery_attempts = 0
         self._zoom_recovery_due = None
         self._zoom_failure_kind = None
@@ -322,6 +456,12 @@ class OpticalCycleMixin:
         self._zoom_recovery_due = None
         self._cycle_no_more_frames = no_more_frames
         self._cycle_exit_reason = reason
+        if self.active:
+            cutoff = self.last_timestamp if self.last_timestamp is not None else self.active["start"]
+            if self._media_last_target is not None:
+                policy = self._cycle_policy or self.settings
+                cutoff = min(cutoff, self._media_last_target + policy.departure_confirm_seconds)
+            self._seal_optical_media(cutoff, reason)
         self._clear_buffer()
         self.hits = 0
         if self._control_future is not None and self._control_target != 1:
@@ -441,13 +581,22 @@ class OpticalCycleMixin:
                 self.error = "摄像头分辨率改变，已结束本轮并尝试缩回 1×"
                 self._halt_optical("resolution_changed")
                 return
-            self._write_frame(image, timestamp)
-            if timestamp - self.active["start"] >= policy.max_clip_seconds:
-                # The guard applies during recovery/error too: stationary
-                # background detections can never keep fallback video forever.
+            if not self.active.get("media_stopped") and timestamp - self.active["start"] >= policy.max_clip_seconds:
+                # Freeze media before a sparse/new source frame can pad beyond
+                # the limit. Motor recovery has its own bounded lifetime.
+                self._seal_optical_media(self.active["start"] + policy.max_clip_seconds, "cycle_timeout")
                 self.error = self.error or "本轮录像超过安全时长，已停止循环并尝试缩回 1×"
                 self._halt_optical("cycle_timeout")
                 return
+            if not self.active.get("media_stopped"):
+                self._queue_optical_media(image, timestamp)
+                if self.phase != "zoomed" or self._zoom_failure_kind == "transport":
+                    observed = self._positive_unconfirmed_target(image, vessels, observation_context)
+                    if observed:
+                        self._observe_media_target(observed, image, timestamp)
+                    elif (self._zoom_failure_kind == "transport" and self._media_last_target is not None
+                            and timestamp - self._media_last_target >= self.TARGET_EVIDENCE_GRACE_SECONDS):
+                        self._end_unknown_media(policy)
         self._recover_zoom_if_due()
         if self.phase == "rearming":
             if self._overview_since is None:
@@ -456,12 +605,17 @@ class OpticalCycleMixin:
                 if self.active:
                     self.cycle_count += 1
                     self._finish(self._cycle_exit_reason)
+                elif self._closed_cycle_pending:
+                    self.cycle_count += 1
                 self._cycle_policy = None
                 self.locked_target = None
                 self._pending_target_id = None
                 self._zoom_fallback_active = False
                 self._zoom_failure_kind = None
                 self._zoom_recovery_attempts = 0
+                self._closed_cycle_id = None
+                self._closed_cycle_pending = False
+                self._clear_optical_media()
                 self._phase("overview")
             # Require a subsequent inference captured after the panorama has
             # settled AND the previous recording was closed.
@@ -493,6 +647,11 @@ class OpticalCycleMixin:
             self._initial_target_height = candidate["height_ratio"]
             self._last_zoom_adjust = timestamp
             self._start(image, fps, timestamp, single=True)
+            self._clear_optical_media()
+            self._media_last_target = timestamp
+            self._media_target_box = self._source_target_box(candidate, image.shape[1], image.shape[0])
+            self._closed_cycle_id = None
+            self._closed_cycle_pending = False
             item = self.catalog[self.active["id"]]
             item.update(recording_mode="optical_cycle", cycle_index=self.cycle_count + 1,
                         optical_zoom_factor=self._active_zoom_factor, initial_optical_zoom_factor=self._active_zoom_factor,
@@ -510,11 +669,13 @@ class OpticalCycleMixin:
             if target:
                 self.locked_target = {**self.locked_target, **target}
                 observed_vessel = self.target_selector.tracks[target["target_id"]].vessel
+                self._observe_media_target(observed_vessel, image, timestamp)
                 self._record_optical_attributes([observed_vessel])
                 self._zoomed_ship_seen = True
                 self._empty_since = None
                 if policy.suppress_stationary and target["motion_state"] == "stationary":
                     self._cycle_exit_reason = "target_stationary"
+                    self._seal_optical_media(timestamp, "target_stationary")
                     self._command_zoom(1., "zooming_out")
                     return
                 if not self._zoom_fallback_active and policy.adaptive_zoom_enabled and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
@@ -537,8 +698,11 @@ class OpticalCycleMixin:
                 self._empty_since = None
                 if timestamp - self._zoomed_since >= policy.target_acquire_timeout_seconds:
                     self._cycle_exit_reason = "target_not_reacquired"
+                    self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds,
+                        "target_not_reacquired")
                     self._command_zoom(1., "zooming_out")
             elif self._empty_since is None:
                 self._empty_since = timestamp
             elif timestamp - self._empty_since >= policy.departure_confirm_seconds:
+                self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds, "vessel_left")
                 self._command_zoom(1., "zooming_out")

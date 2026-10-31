@@ -305,7 +305,7 @@ def test_transport_failure_keeps_video_until_confirmed_panorama_and_target_depar
     recording_id = harness.manager.status()["active_id"]
     assert recording_id
     before = len([event for event in harness.events if event[0] == "frame"])
-    for _ in range(5): harness.feed()
+    for _ in range(5): harness.feed([ship()])
     assert len([event for event in harness.events if event[0] == "frame"]) > before
     assert harness.manager.status()["current_zoom_factor"] is None
     assert harness.manager.catalog[recording_id]["status"] == "recording"
@@ -380,6 +380,63 @@ def test_explicit_source_stop_cancels_pending_fallback_recovery(cycle_factory, m
     assert harness.manager.status()["active_id"] is None
 
 
+@pytest.mark.parametrize("observations", ["background", "no_inference", "stale", "frame_local_id"])
+def test_unknown_view_closes_media_after_target_evidence_ends_without_waiting_for_motor(cycle_factory, monkeypatch, observations):
+    import httpx
+    harness = cycle_factory()
+    harness.warm()
+    original = harness.controller.move_to
+    network_restored = [False]
+    def unavailable(target):
+        if not network_restored[0]:
+            raise httpx.ConnectTimeout("lens unavailable")
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", unavailable)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.feed([ship()])
+    harness.phase("recovering")
+    recording_id = harness.manager.status()["active_id"]
+    for _ in range(40):
+        status = harness.feed([ship()], advance=.25)
+        assert status["active_id"] == recording_id
+    last_target = harness.timestamp
+    stale_context = {**harness.manager.zoom_observation_context(), "generation": -1}
+    background = {**ship(), "ship_id": 99}
+    reused_frame_id = {**ship(), "confidence": .32,
+                       "boxes": [{"type": "ship", "xywh": [1, 1, 2, 2]}]}
+    for _ in range(24):
+        if observations == "background":
+            harness.feed([background, reused_frame_id], advance=.25)
+        elif observations == "frame_local_id":
+            harness.feed([{**ship(), "tracked": False}], advance=.25)
+        elif observations == "stale":
+            harness.feed([ship()], context=stale_context, advance=.25)
+        else:
+            harness.feed(advance=.25)
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    item = harness.manager.catalog[recording_id]
+    assert harness.manager.status()["active_id"] is None
+    assert item["status"] == "interrupted"
+    assert item["media_end_reason"] == "target_evidence_timeout"
+    assert item["source_end_seconds"] <= last_target + .3 + .001
+    assert item["duration_seconds"] <= last_target - item["source_start_seconds"] + .5
+    assert item["returned_to_overview"] is False
+    # Recovery proceeds without retaining the now-closed writer. It cannot
+    # start a fresh cycle until the camera actually confirms panorama.
+    harness.feed([background], advance=3)
+    assert harness.manager.status()["active_id"] is None
+    network_restored[0] = True
+    clock[0] += 6
+    harness.feed()
+    harness.phase("overview")
+    assert item["returned_to_overview"] is True
+    assert harness.manager.cycle_count == 1
+    assert item["source_end_seconds"] <= last_target + .301
+    harness.start_cycle()
+    assert len(harness.manager.catalog) == 2
+
+
 def test_cycle_opens_recording_before_requested_optical_zoom(cycle_factory):
     harness = cycle_factory()
     harness.warm()
@@ -393,7 +450,7 @@ def test_cycle_opens_recording_before_requested_optical_zoom(cycle_factory):
     assert status["phase"] == "zoomed"
 
 
-def test_tail_departure_waits_for_verified_panorama_before_saving(cycle_factory):
+def test_tail_departure_freezes_video_before_waiting_for_verified_panorama(cycle_factory):
     harness = cycle_factory()
     harness.warm()
     recording_id = harness.start_cycle()
@@ -402,16 +459,52 @@ def test_tail_departure_waits_for_verified_panorama_before_saving(cycle_factory)
     assert harness.controller.entered.wait(3)
     assert harness.manager.status()["active_id"] == recording_id
     assert harness.manager.catalog[recording_id]["status"] == "recording"
-    assert ("recording_close", recording_id) not in harness.events
-    # Frames during zoom-out belong to the same clip, never to a new one.
+    assert ("recording_close", recording_id) in harness.events
+    assert harness.manager.status()["media_recording"] is False
+    duration = harness.manager.catalog[recording_id]["duration_seconds"]
+    # Motor return is still this cycle, but its idle frames no longer extend
+    # the video after confirmed target departure.
     harness.feed([ship()])
+    harness.feed([ship()], advance=10)
+    assert harness.manager.catalog[recording_id]["duration_seconds"] == duration
     assert len(harness.manager.list_recordings()["items"]) == 1
     harness.controller.release.set()
     harness.phase("overview")
     harness.manager.executor.submit(lambda: None).result(timeout=5)
     assert harness.manager.catalog[recording_id]["status"] == "completed"
-    assert harness.events.index(("move_settled", 1), harness.events.index(("move_settled", 3))) < harness.events.index(("recording_close", recording_id))
+    assert harness.events.index(("recording_close", recording_id)) < harness.events.index(("move_settled", 1), harness.events.index(("move_settled", 3)))
     assert harness.manager.status()["current_zoom_factor"] == 1
+
+
+def test_departed_video_is_finalized_even_if_panorama_return_cannot_be_confirmed(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory()
+    harness.warm()
+    recording_id = harness.start_cycle()
+    original = harness.controller.move_to
+    restored = [False]
+    def disconnected_return(target):
+        if target == 1 and not restored[0]:
+            raise httpx.ConnectTimeout("return unavailable")
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", disconnected_return)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.depart()
+    harness.phase("recovering")
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    item = harness.manager.catalog[recording_id]
+    assert harness.manager.status()["active_id"] is None
+    assert item["status"] == "interrupted"
+    duration = item["duration_seconds"]
+    harness.feed([], advance=60)
+    assert item["duration_seconds"] == duration
+    restored[0] = True
+    clock[0] += 5
+    harness.feed()
+    harness.phase("overview")
+    assert item["returned_to_overview"] is True
+    assert item["status"] == "interrupted"
 
 
 def test_fresh_panorama_repeats_even_when_same_ship_track_is_still_visible(cycle_factory):

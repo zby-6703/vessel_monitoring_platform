@@ -131,6 +131,76 @@ def test_horizontal_entry_uses_height_even_before_full_width_visible(setup):
     assert models.name_calls == models.draft_calls == 1
 
 
+def test_established_bow_entry_survives_moving_a_few_pixels_inside_before_confirmation(setup):
+    processor, service, models = setup
+    for timestamp, x, width in ((0, 0, 30), (.2, 5, 35), (.4, 10, 40)):
+        result = run(processor, service, timestamp, [vessel((x, 400, x + width, 480))])
+    assert result.vessels[0].processing["eligible"]
+    assert result.vessels[0].processing["width_ratio"] < .12
+    assert result.vessels[0].processing["horizontal_entry_exemption"]
+    assert models.name_calls == models.draft_calls == 1
+
+
+def test_narrow_interior_target_does_not_inherit_entry_from_reused_id(setup):
+    processor, service, models = setup
+    settings = policy(target_confirm_hits=1, target_confirm_seconds=0)
+    first = run(processor, service, 0, [vessel((0, 400, 30, 480))], settings)
+    result = run(processor, service, .2, [vessel((50, 400, 80, 480))], settings)
+    # The selector permits this nearby same-ID association; the admission
+    # history must still reject transferring the old partial-entry privilege.
+    assert result.vessels[0].processing["target_id"] == first.vessels[0].processing["target_id"]
+    assert result.vessels[0].processing["reason"] == "small_target"
+    assert not result.vessels[0].processing["horizontal_entry_exemption"]
+    assert models.name_calls == models.draft_calls == 1
+
+
+def test_true_observation_gap_clears_old_edge_exemption(setup):
+    processor, service, models = setup
+    settings = policy(target_confirm_hits=1, target_confirm_seconds=0)
+    run(processor, service, 0, [vessel((0, 400, 30, 480))], settings)
+    result = run(processor, service, 3., [vessel((5, 400, 40, 480))], settings)
+    assert result.vessels[0].processing["reason"] == "small_target"
+    assert not result.vessels[0].processing["horizontal_entry_exemption"]
+    assert models.name_calls == models.draft_calls == 1
+
+
+def test_narrow_hull_without_continued_growth_cannot_keep_entry_privilege(setup):
+    processor, service, models = setup
+    for timestamp, x in ((0, 0), (.2, 5), (.4, 10)):
+        result = run(processor, service, timestamp, [vessel((x, 400, x + 30, 480))])
+    assert result.vessels[0].processing["eligible"]
+    result = run(processor, service, 2.1, [vessel((10, 400, 40, 480))])
+    assert result.vessels[0].processing["reason"] == "small_target"
+    assert not result.vessels[0].processing["horizontal_entry_exemption"]
+
+
+def test_full_width_confirmation_closes_partial_entry_privilege(setup):
+    processor, service, models = setup
+    settings = policy(target_confirm_hits=1, target_confirm_seconds=0)
+    run(processor, service, 0, [vessel((0, 400, 30, 480))], settings)
+    for timestamp in (.2, .4, .6):
+        result = run(processor, service, timestamp, [vessel((5, 400, 155, 480))], settings)
+    assert result.vessels[0].processing["eligible"]
+    assert not result.vessels[0].processing["horizontal_entry_exemption"]
+
+
+def test_partial_entry_still_obeys_height_roi_and_stationary_rules(setup):
+    processor, service, models = setup
+    settings = RecordingSettings(suppress_stationary=True, stationary_seconds=3,
+        target_confirm_hits=1, target_confirm_seconds=0, detail_interval_seconds=0)
+    for timestamp in (0, .5, 1., 1.5, 2., 2.5, 3.):
+        # Slowly changing visible width keeps entry evidence fresh but cannot
+        # establish a sustained displacement large enough to prove motion.
+        result = run(processor, service, timestamp,
+            [vessel((0, 400, 30 + 5 * timestamp, 480))], settings)
+    assert result.vessels[0].processing["horizontal_entry_exemption"]
+    assert result.vessels[0].processing["reason"] == "stationary_excluded"
+    outside = RealtimeTargetProcessor()
+    result = run(outside, service, 0, [vessel((0, 400, 30, 480))],
+        policy(target_roi_left=.1, target_confirm_hits=1, target_confirm_seconds=0))
+    assert result.vessels[0].processing["reason"] == "outside_monitoring_area"
+
+
 @pytest.mark.parametrize("context,reason", [
     ({"zoom_factor": 3., "accept_detections": False, "generation": 1}, "lens_moving"),
     ({"zoom_factor": None, "accept_detections": True, "generation": 1}, "zoom_unknown"),

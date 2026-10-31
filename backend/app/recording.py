@@ -379,7 +379,7 @@ class RecordingManager(OpticalCycleMixin):
 
     def _write_frame(self, image: np.ndarray, timestamp: float):
         clip = self.active
-        if not clip:
+        if not clip or clip.get("media_stopped"):
             return
         target_frames = round((timestamp - clip["start"]) * clip["fps"]) + 1
         while clip["frames"] < target_frames - 1 and clip["previous"] is not None:
@@ -400,7 +400,8 @@ class RecordingManager(OpticalCycleMixin):
         clip, self.active = self.active, None
         if not clip:
             return
-        clip["writer"].close()
+        if not clip.get("media_stopped"):
+            clip["writer"].close()
         item = self.catalog[clip["id"]]
         ended = datetime.fromisoformat(item["started_at"]) + timedelta(seconds=item["duration_seconds"])
         item.update(status="processing", reason=reason, ended_at=ended.isoformat())
@@ -522,13 +523,14 @@ class RecordingManager(OpticalCycleMixin):
             self._maintenance()
             return {"state": "error" if self.error else "disabled" if not self.settings.enabled else "recording" if self.active else "armed",
                     "active_id": self.active["id"] if self.active else None,
+                    "media_recording": bool(self.active and not self.active.get("media_stopped")),
                     "buffer_seconds": round(self.buffer[-1][0] - self.buffer[0][0], 2) if len(self.buffer) > 1 else 0,
                     "error": self.error, "source_name": self.source_name, "storage_bytes": self._storage_bytes(), "zoom_capability": "optical" if self._optical_session else "digital", "focus": self.focus,
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
                     "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
                     "zoom_recovery": {"active": self.phase == "recovering", "failure_kind": self._zoom_failure_kind,
-                        "attempts": self._zoom_recovery_attempts, "fallback_recording": bool(self.active and self._zoom_fallback_active),
+                        "attempts": self._zoom_recovery_attempts, "fallback_recording": bool(self.active and not self.active.get("media_stopped") and self._zoom_fallback_active),
                         "retry_in_seconds": max(0., self._zoom_recovery_due - time.monotonic()) if self._zoom_recovery_due is not None else None},
                     "adaptive_selection": self.adaptive_selection, "locked_target": self.locked_target}
 

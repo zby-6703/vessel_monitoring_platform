@@ -474,3 +474,128 @@ def test_camera_capture_does_not_wait_for_a_blocked_zoom_observer(monkeypatch, t
     assert [event for event, _ in audit_events] == ["camera_start_requested", "camera_running", "camera_stopped"]
     assert audit_events[-1][1]["frame_count"] == 8
     assert audit_events[-1][1]["reason"] == "source_stopped"
+
+
+class ImmediateReconnectEvent(threading.Event):
+    def __init__(self, on_wait=None):
+        super().__init__()
+        self.waits = []
+        self.on_wait = on_wait
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.on_wait:
+            self.on_wait(self)
+        return self.is_set()
+
+
+def test_transient_read_failure_reconnects_serially_with_new_session_and_one_model_load(monkeypatch, tmp_path):
+    settings = replace(get_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://camera/stream")
+    worker = live_capture.CameraCapture(None, api._live_frame)
+    worker._status.update(camera_id="test-camera", session_id="initial-session")
+    worker._shutdown_requested = ImmediateReconnectEvent()
+    calls, statuses = [], []
+    active = {"workers": 0, "maximum": 0}
+
+    class Models(FakeModels):
+        def load(self): calls.append("load")
+        def release(self): calls.append("release-model")
+
+    class Recorder(FrameRecorder):
+        def fail(self, error): calls.append("close-failed-clip")
+        def wait_for_optical_stop(self, timeout):
+            calls.append("drain-optics")
+            return True
+
+    recorder = Recorder()
+
+    class Camera:
+        opened = 0
+        def __init__(self):
+            self.index = 0
+            Camera.opened += 1
+            self.attempt = Camera.opened
+        def open(self, *_):
+            calls.append(f"open-{self.attempt}")
+            assert active["workers"] == 0
+            return True
+        def get(self, *_): return 25
+        def release(self): calls.append(f"release-{self.attempt}")
+        def read(self):
+            self.index += 1
+            if self.index == 1:
+                return True, np.zeros((48, 64, 3), dtype=np.uint8)
+            if self.attempt == 2:
+                worker.stop()
+            return False, None
+
+    def infer(*_args):
+        active["workers"] += 1
+        active["maximum"] = max(active["maximum"], active["workers"])
+        try: worker.stop_event.wait(1)
+        finally: active["workers"] -= 1
+
+    monkeypatch.setattr(live_capture, "ModelRegistry", Models)
+    monkeypatch.setattr(live_capture.cv2, "VideoCapture", Camera)
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(worker, "_observe_zoom", lambda *_: None)
+    monkeypatch.setattr(worker, "_infer_loop", infer)
+    monkeypatch.setattr(worker, "_publish", lambda payload, _: statuses.append(payload["data"].copy()))
+    worker._run(settings, None, 1)
+    assert Camera.opened == 2
+    assert active == {"workers": 0, "maximum": 1}
+    assert calls.count("load") == calls.count("release-model") == 1
+    assert calls.index("release-1") < calls.index("drain-optics") < calls.index("open-2")
+    assert worker._shutdown_requested.waits == [5.]
+    assert len({frame["session_id"] for frame in recorder.frames}) == 2
+    assert any(state["status"] == "reconnecting" for state in statuses)
+    assert worker.snapshot()["status"] == "stopped"
+
+
+def test_explicit_stop_during_reconnect_wait_prevents_any_further_open(monkeypatch, tmp_path):
+    settings = replace(get_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://camera/stream")
+    worker = live_capture.CameraCapture(None, None)
+    attempts = []
+    worker._shutdown_requested = ImmediateReconnectEvent(lambda _: worker.stop())
+    monkeypatch.setattr(live_capture, "ModelRegistry", FakeModels)
+    monkeypatch.setattr(worker, "_publish", lambda *_: None)
+    monkeypatch.setattr(worker, "_run_attempt", lambda *_: attempts.append(True) or ("temporary read error", "camera_read_failed"))
+    monkeypatch.setattr(live_capture, "recording_manager", FrameRecorder())
+    worker._run(settings, None, 1)
+    assert attempts == [True]
+    assert worker.snapshot()["status"] == "stopped"
+    assert worker.stop_event.is_set()
+
+
+def test_reconnect_backoff_is_bounded_and_inference_failure_is_terminal(monkeypatch):
+    settings = get_settings()
+    worker = live_capture.CameraCapture(None, None)
+    worker._shutdown_requested = ImmediateReconnectEvent()
+    attempts = []
+
+    def attempt(*_):
+        attempts.append(True)
+        return ("temporary connection error", "camera_connection_failed") if len(attempts) <= 5 else ("model error", "inference_failed")
+
+    monkeypatch.setattr(live_capture, "ModelRegistry", FakeModels)
+    monkeypatch.setattr(worker, "_run_attempt", attempt)
+    monkeypatch.setattr(worker, "_publish", lambda *_: None)
+    monkeypatch.setattr(live_capture, "recording_manager", FrameRecorder())
+    worker._run(settings, None, 1)
+    assert len(attempts) == 6
+    assert worker._shutdown_requested.waits == [5., 10., 20., 30., 30.]
+
+
+def test_model_load_error_never_enters_reconnect_attempt(monkeypatch):
+    worker = live_capture.CameraCapture(None, None)
+    attempts = []
+
+    class BrokenModel(FakeModels):
+        def load(self): raise RuntimeError("invalid deployment")
+
+    monkeypatch.setattr(live_capture, "ModelRegistry", BrokenModel)
+    monkeypatch.setattr(worker, "_run_attempt", lambda *_: attempts.append(True))
+    monkeypatch.setattr(worker, "_publish", lambda *_: None)
+    worker._run(get_settings(), None, 1)
+    assert attempts == []
+    assert worker.snapshot()["status"] == "failed"

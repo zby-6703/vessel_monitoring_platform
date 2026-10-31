@@ -8,6 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import math
 import time
+import httpx
 
 from .vessel_selection import VesselTargetSelector
 from .scene_motion import BackgroundMotionEstimator
@@ -21,6 +22,7 @@ class OpticalCycleMixin:
         self._control_future = None
         self._control_target = None
         self._control_started = 0.
+        self._zoom_retry_count = 0
         self._cycle_generation = 0
         self._optical_session = False
         self._cycle_halt = False
@@ -115,7 +117,9 @@ class OpticalCycleMixin:
             self.catalog[self.active["id"]].setdefault("zoom_events", []).append({
                 "source_seconds": self.last_timestamp, "factor": target, "settled": settled})
 
-    def _command_zoom(self, target: float, phase: str):
+    def _command_zoom(self, target: float, phase: str, *, retry: bool = False):
+        if not retry:
+            self._zoom_retry_count = 0
         self._phase(phase)
         self._control_target = target
         self._control_started = time.monotonic()
@@ -142,8 +146,18 @@ class OpticalCycleMixin:
                 result = future.result()
                 if not isinstance(result, dict) or result.get("settled") is not True or not math.isclose(float(result.get("factor", -1)), target, abs_tol=.001):
                     raise ValueError("镜头未确认到达指定倍率")
-            except Exception:
+            except Exception as exc:
                 self.current_zoom_factor = None
+                if (isinstance(exc, (httpx.TransportError, OSError))
+                        and not self._cycle_halt and self._zoom_retry_count < 1):
+                    # Absolute lens positioning is idempotent. Retry one
+                    # interrupted request, never an unsupported command,
+                    # authentication rejection or an unconfirmed timeout.
+                    self._zoom_retry_count += 1
+                    record_event("optical_phase", phase=command_phase,
+                        zoom_factor=target, reason="zoom_retry")
+                    self._command_zoom(target, command_phase, retry=True)
+                    return
                 if self._cycle_halt and target != 1:
                     self._command_zoom(1., "zooming_out")
                     return

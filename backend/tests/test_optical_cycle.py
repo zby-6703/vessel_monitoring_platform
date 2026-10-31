@@ -192,6 +192,40 @@ def cycle_factory(tmp_path, monkeypatch):
         harness.manager.executor.shutdown(wait=True)
 
 
+@pytest.mark.parametrize("factor", [1, 3])
+def test_one_transient_absolute_move_failure_is_retried_without_losing_the_cycle(cycle_factory, monkeypatch, factor):
+    import httpx
+    harness = cycle_factory()
+    original = harness.controller.move_to
+    attempts = []
+    def transient(target):
+        attempts.append(target)
+        if target == factor and attempts.count(target) == 1:
+            raise httpx.ReadError("temporary lens connection interrupted")
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", transient)
+    harness.warm()
+    if factor == 3:
+        harness.start_cycle()
+        assert len(harness.manager.catalog) == 1
+    assert attempts.count(factor) == 2
+    assert harness.manager.status()["error"] is None
+
+
+def test_transient_lens_retries_are_bounded(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory()
+    attempts = []
+    def unavailable(target):
+        attempts.append(target)
+        raise httpx.ConnectError("lens connection unavailable")
+    monkeypatch.setattr(harness.controller, "move_to", unavailable)
+    harness.feed()
+    harness.phase("error")
+    assert attempts == [1., 1.]
+    assert harness.manager.status()["active_id"] is None
+
+
 def test_cycle_opens_recording_before_requested_optical_zoom(cycle_factory):
     harness = cycle_factory()
     harness.warm()

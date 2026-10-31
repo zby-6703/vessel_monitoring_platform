@@ -266,13 +266,15 @@ export interface RecordingItem {
   zoom_events?: Array<{ source_seconds?: number; factor: number; settled: boolean }>
 }
 export interface CameraStatus {
-  status: 'idle' | 'starting' | 'running' | 'stopped' | 'failed'
+  status: 'idle' | 'starting' | 'running' | 'reconnecting' | 'stopped' | 'failed'
   configured: boolean
   session_id: string | null
   camera_id: string
   filename: string | null
   frame_id: number
   error: string | null
+  reconnect_attempt?: number
+  retry_delay_seconds?: number | null
 }
 export interface PtzStatus {
   configured: boolean; supported: boolean; focus_supported?: boolean; autofocus_supported?: boolean; focus_error?: string | null; error: string | null

@@ -90,12 +90,17 @@ def validate_recording_interval(frame_step: int, fps: float, *, inference_second
 class CameraCapture:
     ZOOM_OBSERVATION_INTERVAL = 5.
     ZOOM_OBSERVATION_JOIN_TIMEOUT = .5
+    RECONNECT_INITIAL_SECONDS = 5.
+    RECONNECT_MAX_SECONDS = 30.
 
     def __init__(self, broadcast: Callable, live_frame: Callable) -> None:
         self.broadcast = broadcast
         self.live_frame = live_frame
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
+        # Attempt teardown stops frame workers; only this separate token means
+        # the operator/service cancelled the requested camera capture.
+        self._shutdown_requested = threading.Event()
         self.thread: threading.Thread | None = None
         self.inference_thread: threading.Thread | None = None
         self.zoom_observation_thread: threading.Thread | None = None
@@ -104,7 +109,8 @@ class CameraCapture:
         self._zoom_observation_stop = threading.Event()
         self._inference_error: str | None = None
         self._status = {"status": "idle", "session_id": None, "camera_id": None,
-                        "filename": None, "frame_id": 0, "error": None}
+                        "filename": None, "frame_id": 0, "error": None,
+                        "reconnect_attempt": 0, "retry_delay_seconds": None}
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -125,11 +131,12 @@ class CameraCapture:
             if config.get("enabled") and config.get("recording_mode") == "optical_cycle":
                 recording_manager.validate_optical_settings()
             self.stop_event.clear()
+            self._shutdown_requested.clear()
             self._zoom_observation_stop = threading.Event()
             self._inference_error = None
             self._status.update(status="starting", session_id=uuid.uuid4().hex,
                                 camera_id=settings.live_camera_id, filename=settings.live_camera_name,
-                                frame_id=0, error=None)
+                                frame_id=0, error=None, reconnect_attempt=0, retry_delay_seconds=None)
             record_event("camera_start_requested", camera_id=self._status["camera_id"],
                 session_id=self._status["session_id"], source_type="camera", frame_count=0)
             self.thread = threading.Thread(target=self._run, args=(settings, loop, frame_step or settings.live_capture_frame_step),
@@ -138,10 +145,11 @@ class CameraCapture:
             return self.snapshot()
 
     def stop(self) -> dict:
+        self._shutdown_requested.set()
         self.stop_event.set()
         self._zoom_observation_stop.set()
         with self.lock:
-            if self._status["status"] in {"starting", "running"}:
+            if self._status["status"] in {"starting", "running", "reconnecting"}:
                 self._status["status"] = "stopped"
             return self.snapshot()
 
@@ -160,17 +168,69 @@ class CameraCapture:
                 pending.cancel()
 
     def _run(self, settings: Settings, loop: asyncio.AbstractEventLoop, frame_step: int) -> None:
-        capture = None
         models = None
-        frames: queue.Queue = queue.Queue(maxsize=1)
-        detections: queue.Queue = queue.Queue(maxsize=1)
-        failure = None
-        failure_reason = "model_failed"
         try:
             models = ModelRegistry(settings)
             models.load()
+            attempt = 0
+            while not self._shutdown_requested.is_set():
+                # Never reuse model tensors or change source identity while an
+                # older inference call still owns them.
+                self.stop_event.clear()
+                if self._shutdown_requested.is_set():
+                    break
+                self._zoom_observation_stop = threading.Event()
+                self._inference_error = None
+                if attempt:
+                    with self.lock:
+                        self._status.update(status="starting", session_id=uuid.uuid4().hex,
+                            frame_id=0, error=None, retry_delay_seconds=None)
+                    record_event("camera_start_requested", camera_id=self._status["camera_id"],
+                        session_id=self._status["session_id"], source_type="camera", frame_count=0)
+                failure, reason = self._run_attempt(settings, loop, frame_step, models)
+                if self._shutdown_requested.is_set() or reason not in {"camera_connection_failed", "camera_read_failed"}:
+                    break
+                if self.inference_thread and self.inference_thread.is_alive():
+                    with self.lock:
+                        self._status.update(status="failed", error="上次推理尚未停止，自动重连已暂停；请等待后重新启动采集")
+                    break
+                drain = getattr(recording_manager, "wait_for_optical_stop", None)
+                if drain is not None and not drain(timeout=settings.camera_onvif_zoom_timeout * 2 + 5):
+                    with self.lock:
+                        self._status.update(status="failed", error="镜头归位尚未完成，自动重连已暂停；请检查镜头后重新启动采集")
+                    break
+                attempt += 1
+                delay = min(self.RECONNECT_MAX_SECONDS, self.RECONNECT_INITIAL_SECONDS * 2 ** min(attempt - 1, 3))
+                with self.lock:
+                    self._status.update(status="reconnecting", error=failure,
+                        reconnect_attempt=attempt, retry_delay_seconds=delay)
+                self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
+                if self._shutdown_requested.wait(delay):
+                    break
+        except Exception as exc:
+            with self.lock:
+                self._status.update(status="failed", error=safe_camera_error(exc, settings))
+            record_event("camera_failed", camera_id=self._status["camera_id"],
+                session_id=self._status["session_id"], source_type="camera", reason="model_failed")
+        finally:
+            self.stop_event.set()
+            self._zoom_observation_stop.set()
+            if self._shutdown_requested.is_set():
+                with self.lock:
+                    self._status.update(status="stopped", retry_delay_seconds=None)
+            if models is not None and not (self.inference_thread and self.inference_thread.is_alive()):
+                models.release()
+            self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
+
+    def _run_attempt(self, settings: Settings, loop: asyncio.AbstractEventLoop, frame_step: int, models) -> tuple[str | None, str]:
+        capture = None
+        frames: queue.Queue = queue.Queue(maxsize=1)
+        detections: queue.Queue = queue.Queue(maxsize=1)
+        failure = None
+        failure_reason = "capture_failed"
+        try:
             if self.stop_event.is_set():
-                return
+                return None, "source_stopped"
             service = FrameInferenceService(models)
             failure_reason = "camera_connection_failed"
             capture = cv2.VideoCapture()
@@ -178,6 +238,7 @@ class CameraCapture:
                 cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
             if not opened:
                 raise RuntimeError("无法连接摄像头视频源，请检查地址、账号、网络和编码格式")
+            failure_reason = "capture_failed"
             fps = float(capture.get(cv2.CAP_PROP_FPS))
             if settings.live_capture_fps_override:
                 if not math.isfinite(settings.live_capture_fps_override) or not 1 <= settings.live_capture_fps_override <= 120:
@@ -218,7 +279,7 @@ class CameraCapture:
                     if self.stop_event.is_set():
                         break
                     failure_reason = "camera_read_failed"
-                    raise RuntimeError("摄像头视频中断；本次片段已结束，请检查连接后重新启动采集")
+                    raise RuntimeError("摄像头视频中断；本次片段已结束，正在等待自动重连")
                 timestamp = time.monotonic()
                 vessels = observation_context = None
                 try:
@@ -249,7 +310,7 @@ class CameraCapture:
                 self.inference_thread.join(timeout=10)
             if self.zoom_observation_thread and self.zoom_observation_thread.is_alive():
                 self.zoom_observation_thread.join(timeout=self.ZOOM_OBSERVATION_JOIN_TIMEOUT)
-            if self._inference_error and not failure:
+            if self._inference_error:
                 failure = self._inference_error
                 failure_reason = "inference_failed"
                 with self.lock:
@@ -261,8 +322,9 @@ class CameraCapture:
                     recording_manager.finish(reason="source_stopped")
             except Exception as exc:
                 failure_reason = "recording_error"
+                failure = safe_camera_error(exc, settings)
                 with self.lock:
-                    self._status.update(status="failed", error=safe_camera_error(exc, settings))
+                    self._status.update(status="failed", error=failure)
             with self.lock:
                 if self._status["status"] not in {"failed", "stopped"}:
                     self._status["status"] = "stopped"
@@ -270,11 +332,8 @@ class CameraCapture:
                     camera_id=self._status["camera_id"], session_id=self._status["session_id"],
                     source_type="camera", frame_count=self._status["frame_id"],
                     reason=failure_reason if self._status["status"] == "failed" else "source_stopped")
-            # A still-running model belongs to the inference worker until it
-            # exits; do not release its tensors underneath a model call.
-            if models is not None and not (self.inference_thread and self.inference_thread.is_alive()):
-                models.release()
             self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
+        return failure, failure_reason if failure else "source_stopped"
 
     def _observe_zoom(self, settings: Settings, stopped: threading.Event) -> None:
         """Refresh calibrated idle magnification without owning lens movement."""
@@ -548,9 +607,11 @@ class OnvifControl:
             self._validate_positions(calibration, options)
             target = calibration[factor]
             tolerance = (options["max"] - options["min"]) * settings.camera_onvif_zoom_tolerance
-            _, _, reported_space = self._read_zoom_status(settings)
+            position, movement, reported_space = self._read_zoom_status(settings)
             if reported_space and reported_space != options["space"]:
                 raise RuntimeError("摄像头状态使用了不同的变焦坐标空间，无法核对倍率")
+            if abs(position - target) <= tolerance and movement == "IDLE":
+                return {"factor": factor, "position": position, "settled": True}
             profile = f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>"
             body = profile + f'<t:Position><tt:Zoom x="{target:.12g}" space="{escape(options["space"], {chr(34): "&quot;"})}"/></t:Position>'
             deadline = time.monotonic() + settings.camera_onvif_zoom_timeout

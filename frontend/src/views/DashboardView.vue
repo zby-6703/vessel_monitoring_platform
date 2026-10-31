@@ -42,7 +42,7 @@ let disposed = false
 let statusRefreshing = false
 const settingsDirty = computed(() => Boolean(savedSettings.value && JSON.stringify(settings.value) !== JSON.stringify(savedSettings.value)))
 const localActive = computed(() => ['starting', 'running'].includes(localPlayback.value?.status || 'idle'))
-const cameraActive = computed(() => ['starting', 'running'].includes(camera.value?.status || 'idle'))
+const cameraActive = computed(() => ['starting', 'running', 'reconnecting'].includes(camera.value?.status || 'idle'))
 const monitorCameraId = computed(() => sourceMode.value === 'local' ? localPlayback.value?.camera_id || 'local-video' : camera.value?.camera_id || stream.value?.id || 'camera')
 const liveFrame = computed(() => sourceMode.value === 'local' ? localOverlay.value : cameraOverlay.value)
 const frameImage = computed(() => sourceMode.value === 'local' ? localFrame.value : cameraFrame.value)
@@ -222,7 +222,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
     <section class="monitor-grid">
       <article class="panel video-panel">
         <header class="panel-header"><div><span class="section-kicker">实时画面 / 智能取景</span><h2>{{ monitorName }}</h2></div><div class="live-state"><span class="status-dot" :class="connected ? 'online' : 'offline'"></span>{{ connected ? '实时链路已连接' : '实时链路未连接' }}</div></header>
-        <div class="monitor-source-bar"><el-radio-group v-model="sourceMode" size="small" aria-label="监测视频源"><el-radio-button value="camera"><Camera :size="13" />现场摄像头</el-radio-button><el-radio-button value="local"><Upload :size="13" />本地视频验证</el-radio-button></el-radio-group><span class="muted-text">{{ sourceMode === 'camera' ? cameraActive ? '采集中' : '待启动采集' : localActive ? '实时回放中' : '用于接入前验证' }}</span></div>
+        <div class="monitor-source-bar"><el-radio-group v-model="sourceMode" size="small" aria-label="监测视频源"><el-radio-button value="camera"><Camera :size="13" />现场摄像头</el-radio-button><el-radio-button value="local"><Upload :size="13" />本地视频验证</el-radio-button></el-radio-group><span class="muted-text">{{ sourceMode === 'camera' ? camera?.status === 'reconnecting' ? `链路中断 · 第 ${camera.reconnect_attempt || 1} 次重连（间隔 ${camera.retry_delay_seconds || 5} 秒）` : cameraActive ? '采集中' : '待启动采集' : localActive ? '实时回放中' : '用于接入前验证' }}</span></div>
         <div class="local-video-actions source-actions">
           <input ref="videoInput" hidden type="file" accept="video/*" @change="chooseLocalVideo" />
           <label class="frame-step-setting">每 <el-input-number v-model="liveFrameStep" :min="1" :max="1000" :step="1" :disabled="localActive || cameraActive || sourceBusy" size="small" controls-position="right" /> 帧推理一次</label>

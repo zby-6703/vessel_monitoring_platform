@@ -90,6 +90,13 @@ def test_calibrated_absolute_zoom_uses_real_native_positions_and_returns_to_meas
     assert not any(action in {"ContinuousMove", "GotoHomePosition"} for action, _ in calls)
 
 
+def test_verified_idle_lens_at_target_does_not_repeat_the_same_movement(monkeypatch, optical_settings):
+    control = live_capture.OnvifControl()
+    calls = mock_device(monkeypatch, control, positions=[zoom_status(.1)])
+    assert control.move_to(1) == {"factor": 1, "position": .1, "settled": True}
+    assert not any(action == "AbsoluteMove" for action, _ in calls)
+
+
 @pytest.mark.parametrize("calibration", ["", "[]", '{"1":0}', '{"2":0.2,"3":0.4}', '{"1":0.2,"3":0.2}', '{"1":0.2,"2":0.1,"3":0.4}', '{"1":0.1,"3":"nan"}'])
 def test_invalid_or_missing_magnification_calibration_is_rejected(monkeypatch, optical_settings, calibration):
     monkeypatch.setattr(live_capture, "get_effective_settings", lambda: replace(optical_settings, camera_onvif_zoom_calibration=calibration))

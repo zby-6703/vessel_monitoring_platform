@@ -27,6 +27,7 @@ const operationNote = computed(() => {
   if (!props.loaded) return '正在读取已保存的录制策略。'
   if (props.dirty) return '设置尚未应用，请点击“保存并应用”；开关变化不会立即开始录像。'
   if (!props.modelValue.enabled) return '录制总开关已关闭：检测、跟踪仍可运行，但不会保存过船视频。开启后需保存并启动视频采集。'
+  if (props.sourceStatus === 'reconnecting') return '视频链路中断，采集仍在自动重连；已保存的录制策略保持开启。点击“停止采集”可取消重试。'
   if (props.status?.error) return `录制策略已开启，但当前异常已暂停录制：${props.status.error}`
   if (!sourceRunning.value) return props.sourceMode === 'camera'
     ? '录制策略已开启，正在等待现场视频源。恢复网络后请重新检查镜头能力，再启动摄像头采集；尚未采集时不会生成录像。'
@@ -38,7 +39,7 @@ const operationNote = computed(() => {
 const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
 const activeStep = computed(() => ({ overview: 0, initializing: 0, zooming_in: 1, zoomed: 2, zooming_out: 3, rearming: 4, error: -1 }[props.status?.phase || 'overview']))
 const stages = computed(() => ['1× 观察移动目标 / 近船优先', props.modelValue.adaptive_zoom_enabled ? '锁定目标 / 自适应放大' : '锁定目标 / 指定倍率', '目标船头至船尾经过', '目标离场 / 回 1×', '保存一段 / 重新选船'])
-const stateLabel = computed(() => props.status ? props.status.state === 'disabled' ? '录制已关闭' : props.status.state === 'error' ? '录制异常' : !sourceRunning.value ? '已开启 · 等待视频源' : optical.value && props.sourceMode === 'camera' ? cyclePhaseLabel(props.status.phase, props.status.awaiting_zoomed_target) : { armed: '待船触发', recording: '正在录制' }[props.status.state] : '正在读取状态')
+const stateLabel = computed(() => props.status ? props.status.state === 'disabled' ? '录制已关闭' : props.sourceStatus === 'reconnecting' ? '链路中断 · 自动重连' : props.status.state === 'error' ? '录制异常' : !sourceRunning.value ? '已开启 · 等待视频源' : optical.value && props.sourceMode === 'camera' ? cyclePhaseLabel(props.status.phase, props.status.awaiting_zoomed_target) : { armed: '待船触发', recording: '正在录制' }[props.status.state] : '正在读取状态')
 const storagePercent = computed(() => Math.min(100, (props.status?.storage_bytes || 0) / (props.modelValue.max_storage_gb * 1024 ** 3) * 100))
 const capabilityNote = computed(() => props.ptz?.zoom_error || props.ptz?.error || (!props.ptz ? '正在读取摄像头光学变焦能力' : !props.ptz.absolute_zoom_supported ? '摄像头尚未确认支持绝对光学变焦' : !props.ptz.calibrated ? '请先在服务端完成 1× 与目标倍率的镜头位置标定' : !ready.value ? props.modelValue.adaptive_zoom_enabled ? '设置范围内暂无已标定的放大档位' : '所选倍率未标定，请选择已标定倍率' : props.modelValue.adaptive_zoom_enabled ? `自适应可用档位：${availableMagnifications.value.map((factor) => `${factor}×`).join(' / ')}` : '绝对光学变焦与倍率标定已就绪'))
 const selection = computed(() => props.sourceMode === 'camera' ? props.status?.adaptive_selection : null)

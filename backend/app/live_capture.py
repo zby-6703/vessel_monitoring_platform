@@ -471,8 +471,25 @@ class OnvifControl:
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        self._http_lock = threading.RLock()
+        self._http_client: httpx.Client | None = None
+        self._http_client_key: tuple | None = None
         self._cancel_move = threading.Event()
         self._options_cache: tuple | None = None
+
+    def _close_http_client(self) -> None:
+        client, self._http_client = self._http_client, None
+        self._http_client_key = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Release transport resources after capture and motor work has stopped."""
+        with self._http_lock:
+            self._close_http_client()
 
     def cancel_move(self) -> None:
         self._cancel_move.set()
@@ -664,10 +681,25 @@ class OnvifControl:
             'xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" '
             'xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">'
             f'<s:Header>{security}</s:Header><s:Body><t:{action}>{body}</t:{action}></s:Body></s:Envelope>')
-        auth = httpx.DigestAuth(settings.camera_onvif_username, settings.camera_onvif_password) if settings.camera_onvif_username else None
-        with httpx.Client(timeout=5, auth=auth, follow_redirects=False, trust_env=False) as client:
-            response = client.post(endpoint, content=envelope.encode(), headers={
-                "Content-Type": f'application/soap+xml; charset=utf-8; action="{namespace}/{action}"'})
+        # Reuse both the TCP pool and Digest challenge state. A new Client for
+        # every status poll repeats connection/authentication round trips over
+        # the same remote tunnel that is carrying the camera video.
+        key = (settings.camera_onvif_ptz_url, settings.camera_onvif_imaging_url,
+               settings.camera_onvif_username, settings.camera_onvif_password)
+        with self._http_lock:
+            if self._http_client_key != key or self._http_client is None:
+                self._close_http_client()
+                auth = httpx.DigestAuth(settings.camera_onvif_username, settings.camera_onvif_password) if settings.camera_onvif_username else None
+                self._http_client = httpx.Client(timeout=5, auth=auth, follow_redirects=False, trust_env=False)
+                self._http_client_key = key
+            try:
+                response = self._http_client.post(endpoint, content=envelope.encode(), headers={
+                    "Content-Type": f'application/soap+xml; charset=utf-8; action="{namespace}/{action}"'})
+            except httpx.TransportError:
+                # Do not leave an interrupted connection or its authentication
+                # state attached to the next bounded retry.
+                self._close_http_client()
+                raise
         # Parse faults before raise_for_status: cameras commonly use HTTP 500
         # for a useful ONVIF Unsupported/NotAuthorized SOAP fault.
         try:

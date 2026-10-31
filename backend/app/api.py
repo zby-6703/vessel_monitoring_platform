@@ -424,6 +424,9 @@ async def shutdown_realtime() -> None:
     await asyncio.to_thread(recording_manager.finish, reason="service_shutdown")
     timeout = get_effective_settings().camera_onvif_zoom_timeout * 2 + 5
     await asyncio.to_thread(recording_manager.wait_for_optical_stop, timeout=timeout)
+    close = getattr(onvif_control, "close", None)
+    if close is not None:
+        await asyncio.to_thread(close)
 
 
 class CameraStartRequest(BaseModel):

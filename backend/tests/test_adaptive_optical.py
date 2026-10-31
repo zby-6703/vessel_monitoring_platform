@@ -234,3 +234,35 @@ def test_new_entry_filter_does_not_end_a_locked_vessel_still_in_view(harness_fac
         assert state["phase"] == "zoomed"
     assert harness.lens.calls == [1, 3]
     assert state["adaptive_selection"]["targets"][0]["eligible"] is False
+
+
+def test_recovered_fallback_does_not_attempt_adaptive_zoom_again_in_the_same_clip(harness_factory, monkeypatch):
+    import httpx
+    from types import SimpleNamespace
+    harness = harness_factory(zoom_adjust_cooldown_seconds=1)
+    harness.warm()
+    original = harness.lens.move_to
+    attempts = []
+    def network_failure(factor):
+        attempts.append(factor)
+        if factor != 1:
+            raise httpx.ReadTimeout("temporary control outage")
+        return original(factor)
+    monkeypatch.setattr(harness.lens, "move_to", network_failure)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    target = ship()
+    harness.feed([target])
+    harness.settle("recovering")
+    recording_id = harness.manager.status()["active_id"]
+    clock[0] += 5
+    harness.feed()
+    harness.settle("zoomed")
+    for _ in range(8): harness.feed([target], advance=.5)
+    assert attempts.count(3) == 2
+    assert harness.manager.status()["active_id"] == recording_id
+    assert harness.manager.status()["current_zoom_factor"] == 1
+    assert harness.manager.status()["zoom_recovery"]["fallback_recording"] is True
+    harness.depart_with([])
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    assert harness.manager.catalog[recording_id]["status"] == "interrupted"

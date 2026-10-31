@@ -210,6 +210,48 @@ def test_one_transient_absolute_move_failure_is_retried_without_losing_the_cycle
         assert len(harness.manager.catalog) == 1
     assert attempts.count(factor) == 2
     assert harness.manager.status()["error"] is None
+    assert harness.manager.status()["zoom_recovery"]["failure_kind"] is None
+
+
+def test_deadline_during_network_retry_retains_transport_recovery_and_ignores_late_ack(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory()
+    harness.warm()
+    original = harness.controller.move_to
+    attempts = []
+    def interrupted_then_slow(target):
+        attempts.append(target)
+        if target == 3:
+            count = attempts.count(3)
+            if count == 1:
+                raise httpx.ConnectTimeout("temporary control interruption")
+            if count == 2:
+                harness.controller.entered.set()
+                assert harness.controller.release.wait(5)
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", interrupted_then_slow)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.feed([ship()])
+    assert harness.controller.entered.wait(3)
+    recording_id = harness.manager.status()["active_id"]
+    clock[0] += 4
+    status = harness.feed()
+    assert status["phase"] == "recovering"
+    assert status["zoom_recovery"]["failure_kind"] == "transport"
+    assert status["active_id"] == recording_id
+    assert status["current_zoom_factor"] is None
+    harness.controller.release.set()
+    harness.drain_control()
+    # The delayed 3x acknowledgement belongs to an invalidated generation.
+    assert harness.manager.status()["phase"] == "recovering"
+    assert harness.manager.status()["current_zoom_factor"] is None
+    clock[0] += 5
+    harness.feed()
+    harness.phase("zoomed")
+    assert harness.manager.status()["active_id"] == recording_id
+    assert harness.manager.status()["current_zoom_factor"] == 1
+    assert harness.manager.status()["zoom_recovery"]["fallback_recording"] is True
 
 
 def test_transient_lens_retries_are_bounded(cycle_factory, monkeypatch):
@@ -220,9 +262,121 @@ def test_transient_lens_retries_are_bounded(cycle_factory, monkeypatch):
         attempts.append(target)
         raise httpx.ConnectError("lens connection unavailable")
     monkeypatch.setattr(harness.controller, "move_to", unavailable)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     harness.feed()
-    harness.phase("error")
+    harness.phase("recovering")
     assert attempts == [1., 1.]
+    for _ in range(4):
+        clock[0] += 31
+        harness.feed()
+        harness.drain_control()
+    harness.phase("error")
+    assert attempts == [1.] * 6
+    assert harness.manager.status()["active_id"] is None
+    # Exhaustion stops movement attempts, but later read-only confirmation
+    # can recover without another manual restart or inventing a position.
+    assert harness.manager.optical_control_busy() is False
+    generation = harness.manager.zoom_observation_context()["generation"]
+    harness.manager.observe_zoom_factor(3, generation)
+    assert harness.manager.status()["phase"] == "error"
+    harness.manager.observe_zoom_factor(1, generation)
+    harness.phase("overview")
+    assert harness.manager.status()["error"] is None
+    assert attempts == [1.] * 6
+
+
+def test_transport_failure_keeps_video_until_confirmed_panorama_and_target_departure(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory()
+    harness.warm()
+    original = harness.controller.move_to
+    attempts = []
+    def fail_first_zoom(target):
+        attempts.append(target)
+        if target == 3 and attempts.count(3) <= 2:
+            raise httpx.ReadTimeout("temporary control timeout")
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", fail_first_zoom)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.feed([ship()])
+    harness.phase("recovering")
+    recording_id = harness.manager.status()["active_id"]
+    assert recording_id
+    before = len([event for event in harness.events if event[0] == "frame"])
+    for _ in range(5): harness.feed()
+    assert len([event for event in harness.events if event[0] == "frame"]) > before
+    assert harness.manager.status()["current_zoom_factor"] is None
+    assert harness.manager.catalog[recording_id]["status"] == "recording"
+    clock[0] += 5
+    harness.feed()
+    harness.phase("zoomed")
+    assert harness.manager.status()["current_zoom_factor"] == 1
+    assert harness.manager.status()["error"] is None
+    assert harness.manager.status()["active_id"] == recording_id
+    assert harness.manager.status()["zoom_recovery"]["fallback_recording"] is True
+    harness.feed([ship()])
+    harness.depart()
+    harness.phase("overview")
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    item = harness.manager.catalog[recording_id]
+    assert item["returned_to_overview"] is True
+    assert item["zoom_fallback"] is True
+    assert item["failed_zoom_factor"] == 3
+    assert item["status"] == "interrupted"
+    assert harness.manager.status()["zoom_recovery"]["failure_kind"] is None
+    harness.start_cycle()
+    assert len(harness.manager.catalog) == 2
+
+
+def test_unknown_lens_fallback_is_bounded_even_with_continuous_background_detections(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory(max_clip_seconds=5)
+    harness.warm()
+    monkeypatch.setattr(harness.controller, "move_to", lambda _factor: (_ for _ in ()).throw(httpx.ReadTimeout("timeout")))
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.feed([ship()])
+    harness.phase("recovering")
+    recording_id = harness.manager.status()["active_id"]
+    for _ in range(4):
+        clock[0] += 31
+        harness.feed([ship()])
+        harness.drain_control()
+    harness.phase("error")
+    assert harness.manager.status()["active_id"] == recording_id
+    assert harness.manager.status()["current_zoom_factor"] is None
+    harness.feed([ship()], advance=6)
+    harness.drain_control()
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    assert harness.manager.status()["active_id"] is None
+    assert harness.manager.catalog[recording_id]["status"] == "interrupted"
+    assert harness.manager.catalog[recording_id]["returned_to_overview"] is False
+
+
+def test_explicit_source_stop_cancels_pending_fallback_recovery(cycle_factory, monkeypatch):
+    import httpx
+    harness = cycle_factory()
+    harness.warm()
+    original = harness.controller.move_to
+    attempts = []
+    def unavailable_zoom(target):
+        attempts.append(target)
+        if target != 1: raise httpx.ReadTimeout("timeout")
+        return original(target)
+    monkeypatch.setattr(harness.controller, "move_to", unavailable_zoom)
+    clock = [1000.]
+    monkeypatch.setattr(optical_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    harness.feed([ship()])
+    harness.phase("recovering")
+    harness.manager.finish("source_stopped")
+    harness.drain_control()
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    completed = list(attempts)
+    clock[0] += 60
+    harness.feed()
+    assert attempts == completed
     assert harness.manager.status()["active_id"] is None
 
 

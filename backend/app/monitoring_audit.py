@@ -37,12 +37,12 @@ REASONS = frozenset({
     "storage_failed", "recording_error",
     "source_error", "writer_failed", "process_restarted", "storage_limit",
     "zoom_failed", "cycle_timeout",
-    "zoom_retry",
+    "zoom_retry", "zoom_transport_failed", "zoom_recovered", "zoom_transport_fallback",
 })
 _ENUMS = {
     "recording_mode": frozenset({"optical_cycle", "passage"}),
     "phase": frozenset({"overview", "initializing", "zooming_in", "zoomed",
-                         "zooming_out", "rearming", "error"}),
+                         "zooming_out", "rearming", "recovering", "error"}),
     "source_type": frozenset({"camera", "local_video"}),
     "reason": REASONS,
 }

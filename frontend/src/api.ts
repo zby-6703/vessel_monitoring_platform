@@ -214,8 +214,8 @@ const additionalSelectionReasons: Record<string, string> = {
   stale_observation: '观测已过期，等待新画面',
 }
 export const selectionReasonLabel = (reason?: string) => additionalSelectionReasons[reason || ''] || baseSelectionReasonLabel(reason)
-export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'error'
-export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', error: '光学循环异常' }[phase || 'overview'])
+export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'recovering' | 'error'
+export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', recovering: '镜头通信中断 · 正在恢复 1×', error: '光学循环异常' }[phase || 'overview'])
 export interface RecordingStatus {
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null
@@ -232,6 +232,7 @@ export interface RecordingStatus {
   awaiting_zoomed_target?: boolean
   adaptive_selection?: AdaptiveSelection | null
   locked_target?: AdaptiveTarget | null
+  zoom_recovery?: { active: boolean; failure_kind: string | null; attempts: number; fallback_recording: boolean; retry_in_seconds: number | null }
   focus: { x: number; y: number; width: number; height: number } | null
 }
 export interface RecordingItem {
@@ -255,6 +256,7 @@ export interface RecordingItem {
   cycle_index?: number
   optical_zoom_factor?: number
   returned_to_overview?: boolean
+  zoom_fallback?: boolean
   error?: string | null
   zoom_factor?: number
   settings?: Partial<RecordingSettings>

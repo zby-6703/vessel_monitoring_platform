@@ -23,6 +23,10 @@ class OpticalCycleMixin:
         self._control_target = None
         self._control_started = 0.
         self._zoom_retry_count = 0
+        self._zoom_recovery_attempts = 0
+        self._zoom_recovery_due = None
+        self._zoom_failure_kind = None
+        self._zoom_fallback_active = False
         self._cycle_generation = 0
         self._optical_session = False
         self._cycle_halt = False
@@ -52,7 +56,14 @@ class OpticalCycleMixin:
 
     def optical_control_busy(self) -> bool:
         with self.lock:
+            if self._can_accept_recovery_observation():
+                return False
             return bool(self._control_future is not None or self._optical_session and self.settings.enabled)
+
+    def _can_accept_recovery_observation(self):
+        return (self.phase == "error" and self._zoom_failure_kind == "transport"
+                and self._control_future is None and self.settings.enabled
+                and not self._cycle_halt and not self._cycle_no_more_frames)
 
     def zoom_observation_context(self) -> dict:
         with self.lock:
@@ -63,9 +74,15 @@ class OpticalCycleMixin:
     def observe_zoom_factor(self, factor, generation=None):
         """Accept a read-only lens measurement only for the same idle view."""
         with self.lock:
-            if self._optical_session or self._control_future is not None:
-                return
             if generation is not None and generation != self._cycle_generation:
+                return
+            if self._can_accept_recovery_observation():
+                if factor == 1:
+                    self.current_zoom_factor = 1.
+                    self._zoom_event(1., True)
+                    self._confirmed_zoom_recovery()
+                return
+            if self._optical_session or self._control_future is not None:
                 return
             if factor is not None and (not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor < 1):
                 return
@@ -131,6 +148,46 @@ class OpticalCycleMixin:
         session_id = self.session_id
         future.add_done_callback(lambda completed: self._zoom_completed(completed, session_id))
 
+    def _schedule_zoom_recovery(self, failed_target):
+        """Keep the real frames while trying only a measured panorama return."""
+        self._zoom_failure_kind = "transport"
+        self._cycle_exit_reason = "zoom_transport_fallback"
+        if self.active:
+            self._zoom_fallback_active = True
+            item = self.catalog[self.active["id"]]
+            item.update(zoom_fallback=True, zoom_failure_kind="transport", last_failed_zoom_factor=failed_target)
+            item.setdefault("failed_zoom_factor", failed_target)
+        self._phase("recovering")
+        if self._zoom_recovery_attempts >= 4:
+            self._zoom_recovery_due = None
+            self.error = "镜头网络请求持续失败，自动变焦已暂停；本轮原视频继续保留至时长上限"
+            self._phase("error")
+            return
+        delay = min(30., 5. * 2 ** self._zoom_recovery_attempts)
+        self._zoom_recovery_due = time.monotonic() + delay
+        self.error = "镜头网络请求失败，正在保留原视频并重试恢复 1×，尚未确认镜头位置"
+        record_event("optical_phase", phase="recovering", reason="zoom_transport_failed")
+
+    def _recover_zoom_if_due(self):
+        if (self.phase == "recovering" and not self._cycle_halt
+                and self.settings.enabled and self._control_future is None
+                and self._zoom_recovery_due is not None
+                and time.monotonic() >= self._zoom_recovery_due):
+            self._zoom_recovery_due = None
+            self._zoom_recovery_attempts += 1
+            self._command_zoom(1., "recovering")
+
+    def _confirmed_zoom_recovery(self):
+        self.error = None
+        self._zoom_recovery_due = None
+        record_event("optical_phase", phase="recovering", zoom_factor=1., reason="zoom_recovered")
+        if self.active:
+            self.catalog[self.active["id"]]["returned_to_overview"] = True
+            self._active_zoom_factor = 1.
+            self._phase("zoomed")
+        else:
+            self._phase("rearming")
+
     def _zoom_completed(self, future, session_id):
         with self.lock:
             if future is not self._control_future:
@@ -149,14 +206,25 @@ class OpticalCycleMixin:
             except Exception as exc:
                 self.current_zoom_factor = None
                 if (isinstance(exc, (httpx.TransportError, OSError))
+                        and not self._cycle_halt and command_phase == "recovering"):
+                    self._schedule_zoom_recovery(target)
+                    return
+                if (isinstance(exc, (httpx.TransportError, OSError))
                         and not self._cycle_halt and self._zoom_retry_count < 1):
                     # Absolute lens positioning is idempotent. Retry one
                     # interrupted request, never an unsupported command,
                     # authentication rejection or an unconfirmed timeout.
+                    # Preserve the request's transport origin while the retry
+                    # is outstanding. Its recorder deadline may expire before
+                    # the worker returns another exception or acknowledgement.
+                    self._zoom_failure_kind = "transport"
                     self._zoom_retry_count += 1
                     record_event("optical_phase", phase=command_phase,
                         zoom_factor=target, reason="zoom_retry")
                     self._command_zoom(target, command_phase, retry=True)
+                    return
+                if isinstance(exc, (httpx.TransportError, OSError)) and not self._cycle_halt:
+                    self._schedule_zoom_recovery(target)
                     return
                 if self._cycle_halt and target != 1:
                     self._command_zoom(1., "zooming_out")
@@ -173,7 +241,13 @@ class OpticalCycleMixin:
                 return
             self.current_zoom_factor = target
             self._zoom_event(target, True)
-            if command_phase == "zooming_in" and not self._cycle_halt:
+            if command_phase != "recovering" and not self._zoom_fallback_active:
+                # A successful ordinary retry is no longer a network failure;
+                # do not classify a later unrelated motor timeout as one.
+                self._zoom_failure_kind = None
+            if command_phase == "recovering" and target == 1 and not self._cycle_halt:
+                self._confirmed_zoom_recovery()
+            elif command_phase == "zooming_in" and not self._cycle_halt:
                 # Adaptive scheduling can deliberately record at 1x when the
                 # hull is already large or higher calibrated steps are unsafe.
                 self._active_zoom_factor = target
@@ -204,6 +278,11 @@ class OpticalCycleMixin:
         # worker finishes it before processing the queued return command.
         self._control_future = None
         self.current_zoom_factor = None
+        if self._zoom_failure_kind == "transport" and not self._cycle_halt:
+            # A late/unknown reply is never a position acknowledgement. Keep
+            # video and let the serial worker finish before another 1x attempt.
+            self._schedule_zoom_recovery(target)
+            return
         self.error = "镜头未在限定时间内到位，已停止本轮；请检查摄像头连接和变焦行程"
         self._cycle_halt = True
         self._cycle_exit_reason = "zoom_timeout"
@@ -231,11 +310,16 @@ class OpticalCycleMixin:
         self._active_zoom_factor = None
         self._locked_appearance = None
         self._initial_target_height = None
+        self._zoom_recovery_attempts = 0
+        self._zoom_recovery_due = None
+        self._zoom_failure_kind = None
+        self._zoom_fallback_active = False
         self._cycle_generation += 1
         self._phase("overview")
 
     def _halt_optical(self, reason: str, *, no_more_frames: bool = True):
         self._cycle_halt = True
+        self._zoom_recovery_due = None
         self._cycle_no_more_frames = no_more_frames
         self._cycle_exit_reason = reason
         self._clear_buffer()
@@ -358,6 +442,13 @@ class OpticalCycleMixin:
                 self._halt_optical("resolution_changed")
                 return
             self._write_frame(image, timestamp)
+            if timestamp - self.active["start"] >= policy.max_clip_seconds:
+                # The guard applies during recovery/error too: stationary
+                # background detections can never keep fallback video forever.
+                self.error = self.error or "本轮录像超过安全时长，已停止循环并尝试缩回 1×"
+                self._halt_optical("cycle_timeout")
+                return
+        self._recover_zoom_if_due()
         if self.phase == "rearming":
             if self._overview_since is None:
                 self._overview_since = timestamp
@@ -368,15 +459,14 @@ class OpticalCycleMixin:
                 self._cycle_policy = None
                 self.locked_target = None
                 self._pending_target_id = None
+                self._zoom_fallback_active = False
+                self._zoom_failure_kind = None
+                self._zoom_recovery_attempts = 0
                 self._phase("overview")
             # Require a subsequent inference captured after the panorama has
             # settled AND the previous recording was closed.
             return
         if self._cycle_halt or self.error or self.phase not in {"overview", "zoomed"}:
-            return
-        if self.active and timestamp - self.active["start"] >= policy.max_clip_seconds:
-            self.error = "本轮录像超过安全时长，已停止循环并尝试缩回 1×；请检查船尾离场检测"
-            self._halt_optical("cycle_timeout")
             return
         fresh = vessels is not None and (observation_context is None or
             observation_context.get("generation") == self._cycle_generation and observation_context.get("phase") == self.phase and observation_context.get("accept_detections") is True)
@@ -427,7 +517,7 @@ class OpticalCycleMixin:
                     self._cycle_exit_reason = "target_stationary"
                     self._command_zoom(1., "zooming_out")
                     return
-                if policy.adaptive_zoom_enabled and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
+                if not self._zoom_fallback_active and policy.adaptive_zoom_enabled and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
                     plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
                     next_zoom, current = plan["zoom_factor"], actual_zoom
                     should_reduce = next_zoom < current and (target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)

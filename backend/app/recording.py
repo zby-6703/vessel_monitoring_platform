@@ -410,6 +410,8 @@ class RecordingManager(OpticalCycleMixin):
         interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed"}
         if item.get("recording_mode") == "optical_cycle" and not item.get("returned_to_overview"):
             interrupted = True
+        if item.get("zoom_fallback"):
+            interrupted = True
         self.executor.submit(self._encode, item["id"], "interrupted" if interrupted else "completed")
 
     def finish(self, reason: str = "source_stopped"):
@@ -525,6 +527,9 @@ class RecordingManager(OpticalCycleMixin):
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
                     "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
+                    "zoom_recovery": {"active": self.phase == "recovering", "failure_kind": self._zoom_failure_kind,
+                        "attempts": self._zoom_recovery_attempts, "fallback_recording": bool(self.active and self._zoom_fallback_active),
+                        "retry_in_seconds": max(0., self._zoom_recovery_due - time.monotonic()) if self._zoom_recovery_due is not None else None},
                     "adaptive_selection": self.adaptive_selection, "locked_target": self.locked_target}
 
     def _public_item(self, item: dict) -> dict:

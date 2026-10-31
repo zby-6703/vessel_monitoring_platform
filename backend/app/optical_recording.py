@@ -11,6 +11,7 @@ import time
 
 from .vessel_selection import VesselTargetSelector
 from .scene_motion import BackgroundMotionEstimator
+from .monitoring_audit import record_event
 
 
 class OpticalCycleMixin:
@@ -68,12 +69,16 @@ class OpticalCycleMixin:
                 return
             if self.current_zoom_factor != factor:
                 self._cycle_generation += 1
+                record_event("zoom_observation", generation=self._cycle_generation, zoom_factor=factor,
+                    reason="zoom_unknown" if factor is None else "zoom_observed")
             self.current_zoom_factor = factor
 
     def invalidate_zoom_observation(self):
         with self.lock:
             self.current_zoom_factor = None
             self._cycle_generation += 1
+            record_event("zoom_observation", generation=self._cycle_generation,
+                zoom_factor=None, reason="zoom_unknown")
 
     def available_magnifications(self):
         getter = getattr(self.zoom_controller, "available_magnifications", None)
@@ -95,6 +100,8 @@ class OpticalCycleMixin:
     def _phase(self, phase):
         self.phase = phase
         self._cycle_generation += 1
+        record_event("optical_phase", phase=phase, generation=self._cycle_generation,
+            zoom_factor=self.current_zoom_factor)
         self.hits = 0
         if phase == "rearming":
             self._overview_since = None

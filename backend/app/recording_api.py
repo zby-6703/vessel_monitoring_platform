@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .recording import RecordingSettings, recording_manager
+from .monitoring_audit import recent_events
 
 router = APIRouter(tags=["passage recordings"])
 
@@ -26,6 +27,11 @@ def save_settings(payload: RecordingSettings):
 @router.get("/api/recording/status")
 def status():
     return recording_manager.status()
+
+
+@router.get("/api/recording/events")
+def events(limit: int = Query(50, ge=1, le=100)):
+    return {"items": recent_events(limit)}
 
 
 @router.get("/api/recordings")

@@ -3,7 +3,7 @@ import { Camera, Check, Crosshair, HardDrive, RefreshCw, Save, Settings2, Video,
 import { computed } from 'vue'
 import { cyclePhaseLabel, formatBytes, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
 
-const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; processingSummary?: ProcessingSummary | null }>()
+const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; sourceStatus?: string; processingSummary?: ProcessingSummary | null }>()
 const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'refresh-ptz': [] }>()
 function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettings[K]) {
   const next = { ...props.modelValue, [field]: value }
@@ -19,11 +19,26 @@ const magnifications = computed(() => (props.ptz?.magnifications || []).filter((
 const availableMagnifications = computed(() => magnifications.value.filter((factor) => factor >= props.modelValue.min_optical_zoom && factor <= props.modelValue.max_optical_zoom))
 const ready = computed(() => Boolean(props.ptz?.cycle_supported && (props.modelValue.adaptive_zoom_enabled ? availableMagnifications.value.length > 0 : magnifications.value.some((factor) => Math.abs(factor - props.modelValue.zoom_factor) < .001))))
 const roiValid = computed(() => props.modelValue.target_roi_left < props.modelValue.target_roi_right && props.modelValue.target_roi_top < props.modelValue.target_roi_bottom)
-const blocked = computed(() => !roiValid.value || optical.value && props.modelValue.enabled && !ready.value)
+// Saving a locally valid policy does not require a currently reachable lens.
+// The backend validates calibration; movement validates hardware again.
+const blocked = computed(() => !roiValid.value)
+const sourceRunning = computed(() => props.sourceStatus === 'running')
+const operationNote = computed(() => {
+  if (!props.loaded) return '正在读取已保存的录制策略。'
+  if (props.dirty) return '设置尚未应用，请点击“保存并应用”；开关变化不会立即开始录像。'
+  if (!props.modelValue.enabled) return '录制总开关已关闭：检测、跟踪仍可运行，但不会保存过船视频。开启后需保存并启动视频采集。'
+  if (props.status?.error) return `录制策略已开启，但当前异常已暂停录制：${props.status.error}`
+  if (!sourceRunning.value) return props.sourceMode === 'camera'
+    ? '录制策略已开启，正在等待现场视频源。恢复网络后请重新检查镜头能力，再启动摄像头采集；尚未采集时不会生成录像。'
+    : '录制策略已开启，等待本地视频回放；本地验证使用数字录制，不驱动镜头。'
+  return optical.value && props.sourceMode === 'camera'
+    ? '现场采集与自动录制已开启：先确认 1× 全景，再对符合条件的移动船舶启动循环。'
+    : '视频采集与自动录制已开启，等待符合条件的船舶触发。'
+})
 const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
 const activeStep = computed(() => ({ overview: 0, initializing: 0, zooming_in: 1, zoomed: 2, zooming_out: 3, rearming: 4, error: -1 }[props.status?.phase || 'overview']))
 const stages = computed(() => ['1× 观察移动目标 / 近船优先', props.modelValue.adaptive_zoom_enabled ? '锁定目标 / 自适应放大' : '锁定目标 / 指定倍率', '目标船头至船尾经过', '目标离场 / 回 1×', '保存一段 / 重新选船'])
-const stateLabel = computed(() => props.status ? props.status.state === 'disabled' ? '录制已关闭' : props.status.state === 'error' ? '录制异常' : optical.value ? cyclePhaseLabel(props.status.phase, props.status.awaiting_zoomed_target) : { armed: '待船触发', recording: '正在录制' }[props.status.state] : '正在读取状态')
+const stateLabel = computed(() => props.status ? props.status.state === 'disabled' ? '录制已关闭' : props.status.state === 'error' ? '录制异常' : !sourceRunning.value ? '已开启 · 等待视频源' : optical.value && props.sourceMode === 'camera' ? cyclePhaseLabel(props.status.phase, props.status.awaiting_zoomed_target) : { armed: '待船触发', recording: '正在录制' }[props.status.state] : '正在读取状态')
 const storagePercent = computed(() => Math.min(100, (props.status?.storage_bytes || 0) / (props.modelValue.max_storage_gb * 1024 ** 3) * 100))
 const capabilityNote = computed(() => props.ptz?.zoom_error || props.ptz?.error || (!props.ptz ? '正在读取摄像头光学变焦能力' : !props.ptz.absolute_zoom_supported ? '摄像头尚未确认支持绝对光学变焦' : !props.ptz.calibrated ? '请先在服务端完成 1× 与目标倍率的镜头位置标定' : !ready.value ? props.modelValue.adaptive_zoom_enabled ? '设置范围内暂无已标定的放大档位' : '所选倍率未标定，请选择已标定倍率' : props.modelValue.adaptive_zoom_enabled ? `自适应可用档位：${availableMagnifications.value.map((factor) => `${factor}×`).join(' / ')}` : '绝对光学变焦与倍率标定已就绪'))
 const selection = computed(() => props.sourceMode === 'camera' ? props.status?.adaptive_selection : null)
@@ -67,7 +82,8 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
         </el-collapse>
       </section>
       <el-radio-group :model-value="modelValue.recording_mode" :disabled="!loaded || saving" class="focus-mode-options recording-mode-options" aria-label="录制工作模式" @update:model-value="set('recording_mode', $event as 'optical_cycle' | 'passage')"><el-radio-button value="optical_cycle">光学变焦循环</el-radio-button><el-radio-button value="passage">数字取景录制</el-radio-button></el-radio-group>
-      <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? '观察并选择可录制的目标后开始，镜头缩回 1× 后保存为一个视频，再重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving || optical && !ready && !modelValue.enabled" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
+      <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? '观察并选择可录制的目标后开始，镜头缩回 1× 后保存为一个视频，再重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
+      <p class="setting-hint recording-operation-note" role="status">{{ operationNote }}</p>
       <p v-if="status?.error" class="recording-error" role="alert">{{ status.error }}</p>
       <template v-if="optical">
         <ol class="optical-cycle-stages" aria-label="光学循环录制顺序"><li v-for="(stage, index) in stages" :key="stage" :class="{ active: modelValue.enabled && status?.state !== 'disabled' && status?.state !== 'error' && index === activeStep, passed: modelValue.enabled && status?.state !== 'disabled' && index < activeStep }"><span><Check v-if="modelValue.enabled && index < activeStep" :size="11" /><template v-else>{{ index + 1 }}</template></span><strong>{{ stage }}</strong></li></ol>
@@ -79,6 +95,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
         </template>
         <div v-else class="optical-zoom-setting"><label>目标光学倍率</label><el-select v-if="magnifications.length" :model-value="modelValue.zoom_factor" :disabled="!loaded || saving" aria-label="目标光学倍率" @update:model-value="set('zoom_factor', Number($event))"><el-option v-for="factor in magnifications" :key="factor" :value="factor" :label="`${factor}×`" /></el-select><el-input-number v-else :model-value="modelValue.zoom_factor" :min="1.1" :max="40" :step=".5" :precision="1" :disabled="!loaded || saving" controls-position="right" aria-label="待标定目标光学倍率" @update:model-value="set('zoom_factor', Number($event))" /><span>回位固定为 1×</span></div>
         <div class="optical-capability" :class="{ ready }" role="status"><Camera :size="15" /><span>{{ capabilityNote }}</span><el-button text size="small" :loading="ptzBusy" aria-label="重新检查光学变焦能力" @click="emit('refresh-ptz')"><RefreshCw :size="13" /></el-button></div>
+        <p v-if="!ready" class="setting-hint">离线时可以保存录制策略；恢复采集后仍需核验镜头能力，核验通过才会执行光学变焦。</p>
         <section class="adaptive-target-panel" aria-label="目标优先级与停泊排除">
           <div class="adaptive-target-heading"><strong>近船优先 · {{ modelValue.suppress_stationary ? '停泊排除' : '停泊排除已关闭' }}</strong><span v-if="parkedCount">{{ parkedCount }} 个静止目标</span></div>
           <p class="setting-hint">以船框高度估计近远，同类船型较可靠；不同船型、遮挡和透视会影响结果，不代表实测距离。</p>

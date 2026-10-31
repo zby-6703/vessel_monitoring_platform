@@ -156,7 +156,7 @@ export const defaultRecordingSettings = (): RecordingSettings => ({
   confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
   retention_days: 30, focus_mode: 'auto', zoom_factor: 3, center_x: .5, center_y: .5, padding: .2,
   departure_confirm_seconds: 1, zoom_settle_timeout_seconds: 15, overview_settle_seconds: .5,
-  adaptive_zoom_enabled: true, target_height_ratio: .55, min_optical_zoom: 1.1, max_optical_zoom: 8,
+  adaptive_zoom_enabled: true, target_height_ratio: .70, min_optical_zoom: 1.4, max_optical_zoom: 8,
   suppress_stationary: true, stationary_seconds: 15, stationary_motion_threshold: .015,
   motion_confirm_seconds: 1, target_switch_margin: .2,
   zoom_adjust_cooldown_seconds: 3, zoom_adjust_hysteresis: .15, target_acquire_timeout_seconds: 15,

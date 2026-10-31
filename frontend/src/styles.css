@@ -605,3 +605,4 @@ img { display: block; max-width: 100%; }
 .archive-target-info { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border-strong); background: rgb(33 168 181 / 5%); color: var(--text-secondary); font-size: 11px; line-height: 1.8; }
 .archive-target-info strong { color: #b8eef1; font-weight: 500; }
 @media (max-width: 540px) { .optical-selection-badge { font-size: 9px; bottom: 52px; } .adaptive-target-panel { padding-inline: 10px; } }
+.recording-operation-note { padding: 10px 12px; border: 1px solid var(--border-color, #29434a); border-radius: 8px; background: rgba(29, 167, 180, .07); }

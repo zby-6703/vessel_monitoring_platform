@@ -112,7 +112,6 @@ async function refreshPtz() {
   finally { ptzBusy.value = false }
 }
 async function saveSettings() {
-  if (opticalMode.value && settings.value.enabled && !opticalReady.value) { ElMessage.error(settings.value.adaptive_zoom_enabled ? '请先确认光学变焦能力，并在倍率范围内配置至少一个已标定档位' : '请先确认绝对光学变焦能力，并选择已标定的目标倍率'); return }
   savingSettings.value = true
   try {
     const result = await updateRecordingSettings(settings.value)
@@ -241,7 +240,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
         <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :processing-summary="liveFrame?.processing_summary" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">

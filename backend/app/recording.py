@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import get_settings
 from .optical_recording import OpticalCycleMixin
+from .monitoring_audit import record_event
 
 
 class RecordingSettings(BaseModel):
@@ -37,8 +38,8 @@ class RecordingSettings(BaseModel):
     zoom_settle_timeout_seconds: float = Field(default=15, ge=3, le=60)
     overview_settle_seconds: float = Field(default=.5, ge=0, le=5)
     adaptive_zoom_enabled: bool = True
-    target_height_ratio: float = Field(default=.55, ge=.15, le=.9)
-    min_optical_zoom: float = Field(default=1.1, ge=1.1, le=40)
+    target_height_ratio: float = Field(default=.70, ge=.15, le=.9)
+    min_optical_zoom: float = Field(default=1.4, ge=1.1, le=40)
     max_optical_zoom: float = Field(default=8, ge=1.1, le=40)
     suppress_stationary: bool = True
     stationary_seconds: float = Field(default=15, ge=3, le=600)
@@ -238,6 +239,9 @@ class RecordingManager(OpticalCycleMixin):
                 self._phase("overview")
             self.error = None
             self._maintenance(force=True)
+            record_event("recording_settings_changed", enabled=settings.enabled,
+                recording_mode=settings.recording_mode, min_optical_zoom=settings.min_optical_zoom,
+                target_height_ratio=settings.target_height_ratio, reason="settings_saved")
             return self.settings.model_dump()
 
     def _clear_buffer(self):
@@ -368,6 +372,8 @@ class RecordingManager(OpticalCycleMixin):
             _atomic_json(directory / "manifest.json", item)
             raise
         self.active = {"id": recording_id, "writer": writer, "start": start, "fps": fps, "frames": 0, "shape": image.shape[:2], "previous": None, "previous_focus": None, "persisted_at": time.monotonic()}
+        record_event("recording_started", recording_id=recording_id, camera_id=self.camera_id,
+            session_id=self.session_id, recording_mode=item["recording_mode"])
         if not cv2.imwrite(str(directory / "thumbnail.jpg"), cv2.resize(image, (480, max(2, round(image.shape[0] * 480 / image.shape[1]))))):
             raise RuntimeError("cannot save thumbnail")
 
@@ -398,6 +404,8 @@ class RecordingManager(OpticalCycleMixin):
         item = self.catalog[clip["id"]]
         ended = datetime.fromisoformat(item["started_at"]) + timedelta(seconds=item["duration_seconds"])
         item.update(status="processing", reason=reason, ended_at=ended.isoformat())
+        record_event("recording_encoding", recording_id=item["id"], camera_id=self.camera_id,
+            session_id=self.session_id, recording_mode=item["recording_mode"], reason=reason)
         _atomic_json(self.root / item["id"] / "manifest.json", item)
         interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed"}
         if item.get("recording_mode") == "optical_cycle" and not item.get("returned_to_overview"):
@@ -420,6 +428,8 @@ class RecordingManager(OpticalCycleMixin):
     def fail(self, error: str):
         with self.lock:
             self.error = error
+            record_event("recording_failed", camera_id=self.camera_id,
+                session_id=self.session_id, reason="recording_error")
             if self._optical_session or self._control_future is not None:
                 self._halt_optical("source_error")
             else:
@@ -456,6 +466,10 @@ class RecordingManager(OpticalCycleMixin):
             item.update(status="failed" if error else final_status, error=error)
             item["bytes"] = sum(p.stat().st_size for p in directory.iterdir() if p.is_file())
             _atomic_json(directory / "manifest.json", item)
+            record_event("recording_failed" if error else "recording_finished",
+                recording_id=recording_id, camera_id=item.get("camera_id"),
+                session_id=item.get("session_id"), recording_mode=item.get("recording_mode"),
+                reason="encoding_failed" if error else item.get("reason"))
             self._maintenance(force=True)
 
     def _storage_bytes(self) -> int:

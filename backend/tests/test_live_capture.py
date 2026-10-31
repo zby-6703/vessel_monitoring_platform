@@ -305,3 +305,172 @@ def test_recording_sampling_and_runtime_latency_are_validated(monkeypatch):
     with pytest.raises(RuntimeError, match="推理结果间隔/耗时"):
         live_capture.validate_recording_interval(3, 25, inference_seconds=6)
     live_capture.validate_recording_interval(3, 25, inference_seconds=.1)
+
+
+class ObserverRecorder(FrameRecorder):
+    def __init__(self):
+        super().__init__()
+        self.busy = False
+        self.generation = 7
+        self.observations = []
+
+    def optical_control_busy(self):
+        return self.busy
+
+    def zoom_observation_context(self):
+        return {"generation": self.generation, "zoom_factor": None}
+
+    def observe_zoom_factor(self, factor, generation=None):
+        if not self.busy and generation == self.generation:
+            self.observations.append(factor)
+
+
+class PollSteps:
+    """Advance observer ticks without sleeping or depending on wall time."""
+    def __init__(self, ticks, on_wait=None):
+        self.ticks = ticks
+        self.waits = []
+        self.on_wait = on_wait
+        self.stopped = False
+
+    def is_set(self):
+        return self.stopped
+
+    def wait(self, timeout):
+        self.waits.append(timeout)
+        if self.on_wait:
+            self.on_wait(len(self.waits))
+        self.stopped = len(self.waits) >= self.ticks
+        return self.stopped
+
+
+def observer_settings():
+    return replace(get_settings(), camera_onvif_ptz_url="http://camera/ptz",
+        camera_onvif_profile_token="profile", camera_onvif_username="observer-test",
+        camera_onvif_password="observer-test-password", camera_onvif_zoom_calibration='{"1":0.1,"3":0.4}')
+
+
+@pytest.mark.parametrize("first", [None, RuntimeError("temporary camera timeout")])
+def test_zoom_observer_retries_unknown_or_failed_measurement_without_assuming_one_x(monkeypatch, first):
+    recorder = ObserverRecorder()
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    readings = iter([first, 3.])
+
+    def read():
+        value = next(readings)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", read)
+    worker = live_capture.CameraCapture(None, None)
+    ticks = PollSteps(2)
+    worker._observe_zoom(observer_settings(), ticks)
+    assert recorder.observations == [None, 3.]
+    assert ticks.waits == [5., 5.]
+
+
+def test_zoom_observer_skips_an_owned_cycle_and_resumes_after_it_is_idle(monkeypatch):
+    recorder = ObserverRecorder()
+    recorder.busy = True
+    calls = []
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", lambda: calls.append(True) or 2.)
+    ticks = PollSteps(2, on_wait=lambda tick: setattr(recorder, "busy", False))
+    worker = live_capture.CameraCapture(None, None)
+    worker._observe_zoom(observer_settings(), ticks)
+    assert calls == [True]
+    assert recorder.observations == [2.]
+
+
+@pytest.mark.parametrize("change", ["cycle", "generation", "stop"])
+def test_inflight_zoom_observation_cannot_overwrite_cycle_new_view_or_explicit_stop(monkeypatch, change):
+    recorder = ObserverRecorder()
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    worker = live_capture.CameraCapture(None, None)
+
+    def read():
+        if change == "cycle":
+            recorder.busy = True
+        elif change == "generation":
+            recorder.generation += 1
+        else:
+            worker.stop()
+        return 3.
+
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", read)
+    ticks = worker._zoom_observation_stop if change == "stop" else PollSteps(1)
+    worker._observe_zoom(observer_settings(), ticks)
+    assert recorder.observations == []
+    if change == "stop":
+        assert worker.stop_event.is_set()
+        assert ticks.is_set()
+
+
+@pytest.mark.parametrize("missing", ["camera_onvif_ptz_url", "camera_onvif_profile_token", "camera_onvif_zoom_calibration"])
+def test_zoom_observer_missing_configuration_never_issues_a_network_read(monkeypatch, missing):
+    recorder = ObserverRecorder()
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", lambda: pytest.fail("unexpected network read"))
+    worker = live_capture.CameraCapture(None, None)
+    worker._observe_zoom(replace(observer_settings(), **{missing: ""}), PollSteps(1))
+    assert recorder.observations == [None]
+
+
+def test_zoom_observer_supports_an_anonymous_but_calibrated_camera(monkeypatch):
+    recorder = ObserverRecorder()
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", lambda: 3.)
+    worker = live_capture.CameraCapture(None, None)
+    worker._observe_zoom(replace(observer_settings(), camera_onvif_username="", camera_onvif_password=""), PollSteps(1))
+    assert recorder.observations == [3.]
+
+
+def test_camera_capture_does_not_wait_for_a_blocked_zoom_observer(monkeypatch, tmp_path):
+    settings = replace(observer_settings(), result_root=tmp_path / "results", live_capture_url="rtsp://camera/stream")
+    recorder = FrameRecorder()
+    observer_started, release_observer = threading.Event(), threading.Event()
+    audit_events = []
+    worker = live_capture.CameraCapture(lambda _message: asyncio.sleep(0), api._live_frame)
+
+    def read_zoom():
+        observer_started.set()
+        assert release_observer.wait(2)
+        return 3.
+
+    class Camera:
+        index = 0
+        def open(self, *_): return True
+        def get(self, *_): return 25
+        def release(self): pass
+        def read(self):
+            assert observer_started.wait(1)
+            if self.index == 8:
+                # All source frames must arrive before the native query ends.
+                assert not release_observer.is_set()
+                release_observer.set()
+                worker.stop_event.set()
+                return False, None
+            self.index += 1
+            return True, np.zeros((48, 64, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(live_capture, "get_effective_settings", lambda: settings)
+    monkeypatch.setattr(live_capture, "ModelRegistry", FakeModels)
+    monkeypatch.setattr(live_capture, "FrameInferenceService", EmptyInference)
+    monkeypatch.setattr(live_capture, "ResultRepository", NullRepository)
+    monkeypatch.setattr(live_capture.cv2, "VideoCapture", Camera)
+    monkeypatch.setattr(live_capture, "recording_manager", recorder)
+    monkeypatch.setattr(live_capture.onvif_control, "read_magnification", read_zoom)
+    monkeypatch.setattr(live_capture, "record_event", lambda event, **fields: audit_events.append((event, fields)))
+
+    async def run():
+        worker.start(asyncio.get_running_loop(), frame_step=1)
+        await asyncio.to_thread(worker.join)
+
+    asyncio.run(run())
+    assert len(recorder.frames) == 8
+    assert worker.snapshot()["status"] == "stopped"
+    assert not worker.zoom_observation_thread.is_alive()
+    assert [event for event, _ in audit_events] == ["camera_start_requested", "camera_running", "camera_stopped"]
+    assert audit_events[-1][1]["frame_count"] == 8
+    assert audit_events[-1][1]["reason"] == "source_stopped"

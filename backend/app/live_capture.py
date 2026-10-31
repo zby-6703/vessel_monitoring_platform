@@ -30,6 +30,7 @@ from .database import ResultRepository, SessionLocal
 from .inference.frame_inference import FrameInferenceService
 from .inference.model_registry import ModelRegistry
 from .pipeline import Pipeline
+from .monitoring_audit import record_event
 from .recording import RecordingSettings, recording_manager
 from .target_processing import RealtimeTargetProcessor
 from .schemas import TaskKind
@@ -87,6 +88,9 @@ def validate_recording_interval(frame_step: int, fps: float, *, inference_second
 
 
 class CameraCapture:
+    ZOOM_OBSERVATION_INTERVAL = 5.
+    ZOOM_OBSERVATION_JOIN_TIMEOUT = .5
+
     def __init__(self, broadcast: Callable, live_frame: Callable) -> None:
         self.broadcast = broadcast
         self.live_frame = live_frame
@@ -94,6 +98,10 @@ class CameraCapture:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.inference_thread: threading.Thread | None = None
+        self.zoom_observation_thread: threading.Thread | None = None
+        # Give each observer its own token. A network request completing after
+        # stop must never publish into a newly started camera session.
+        self._zoom_observation_stop = threading.Event()
         self._inference_error: str | None = None
         self._status = {"status": "idle", "session_id": None, "camera_id": None,
                         "filename": None, "frame_id": 0, "error": None}
@@ -117,10 +125,13 @@ class CameraCapture:
             if config.get("enabled") and config.get("recording_mode") == "optical_cycle":
                 recording_manager.validate_optical_settings()
             self.stop_event.clear()
+            self._zoom_observation_stop = threading.Event()
             self._inference_error = None
             self._status.update(status="starting", session_id=uuid.uuid4().hex,
                                 camera_id=settings.live_camera_id, filename=settings.live_camera_name,
                                 frame_id=0, error=None)
+            record_event("camera_start_requested", camera_id=self._status["camera_id"],
+                session_id=self._status["session_id"], source_type="camera", frame_count=0)
             self.thread = threading.Thread(target=self._run, args=(settings, loop, frame_step or settings.live_capture_frame_step),
                                            name="camera-capture", daemon=True)
             self.thread.start()
@@ -128,6 +139,7 @@ class CameraCapture:
 
     def stop(self) -> dict:
         self.stop_event.set()
+        self._zoom_observation_stop.set()
         with self.lock:
             if self._status["status"] in {"starting", "running"}:
                 self._status["status"] = "stopped"
@@ -153,12 +165,14 @@ class CameraCapture:
         frames: queue.Queue = queue.Queue(maxsize=1)
         detections: queue.Queue = queue.Queue(maxsize=1)
         failure = None
+        failure_reason = "model_failed"
         try:
             models = ModelRegistry(settings)
             models.load()
             if self.stop_event.is_set():
                 return
             service = FrameInferenceService(models)
+            failure_reason = "camera_connection_failed"
             capture = cv2.VideoCapture()
             opened = capture.open(settings.live_capture_url, cv2.CAP_FFMPEG, [
                 cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
@@ -172,19 +186,23 @@ class CameraCapture:
             elif not math.isfinite(fps) or fps < 1 or fps > 120:
                 fps = settings.live_capture_fps
             validate_recording_interval(frame_step, fps)
-            # Read the actual calibrated lens position without moving it. This
-            # also permits admission at a known zoom while recording is off.
+            # Old idle lens knowledge is not evidence about this new source.
+            # Native position queries happen off the capture thread: slow
+            # ONVIF must not delay preview, detection or recorder frames.
             context = recording_manager.zoom_observation_context()
             if not recording_manager.optical_control_busy():
-                try:
-                    factor = onvif_control.read_magnification()
-                except Exception:
-                    factor = None
-                recording_manager.observe_zoom_factor(factor, context.get("generation"))
+                recording_manager.observe_zoom_factor(None, context.get("generation"))
             with self.lock:
                 self._status["status"] = "running"
                 session = dict(self._status)
                 session.update(fps=fps, frame_step=frame_step)
+            record_event("camera_running", camera_id=session["camera_id"], session_id=session["session_id"],
+                source_type="camera", frame_count=0)
+            failure_reason = "capture_failed"
+            observation_stop = self._zoom_observation_stop
+            self.zoom_observation_thread = threading.Thread(target=self._observe_zoom,
+                args=(settings, observation_stop), name="camera-zoom-observer", daemon=True)
+            self.zoom_observation_thread.start()
             self.inference_thread = threading.Thread(target=self._inference_worker,
                 args=(service, settings, session, frames, detections, loop), name="camera-inference", daemon=True)
             self.inference_thread.start()
@@ -199,6 +217,7 @@ class CameraCapture:
                 if not ok:
                     if self.stop_event.is_set():
                         break
+                    failure_reason = "camera_read_failed"
                     raise RuntimeError("摄像头视频中断；本次片段已结束，请检查连接后重新启动采集")
                 timestamp = time.monotonic()
                 vessels = observation_context = None
@@ -215,6 +234,7 @@ class CameraCapture:
                 with self.lock:
                     self._status["frame_id"] = frame_index
             if self._inference_error:
+                failure_reason = "inference_failed"
                 raise RuntimeError(self._inference_error)
         except Exception as exc:
             failure = safe_camera_error(exc, settings)
@@ -222,12 +242,16 @@ class CameraCapture:
                 self._status.update(status="failed", error=failure)
         finally:
             self.stop_event.set()
+            self._zoom_observation_stop.set()
             if capture is not None:
                 capture.release()
             if self.inference_thread and self.inference_thread.is_alive():
                 self.inference_thread.join(timeout=10)
+            if self.zoom_observation_thread and self.zoom_observation_thread.is_alive():
+                self.zoom_observation_thread.join(timeout=self.ZOOM_OBSERVATION_JOIN_TIMEOUT)
             if self._inference_error and not failure:
                 failure = self._inference_error
+                failure_reason = "inference_failed"
                 with self.lock:
                     self._status.update(status="failed", error=failure)
             try:
@@ -236,16 +260,54 @@ class CameraCapture:
                 else:
                     recording_manager.finish(reason="source_stopped")
             except Exception as exc:
+                failure_reason = "recording_error"
                 with self.lock:
                     self._status.update(status="failed", error=safe_camera_error(exc, settings))
             with self.lock:
                 if self._status["status"] not in {"failed", "stopped"}:
                     self._status["status"] = "stopped"
+                record_event("camera_failed" if self._status["status"] == "failed" else "camera_stopped",
+                    camera_id=self._status["camera_id"], session_id=self._status["session_id"],
+                    source_type="camera", frame_count=self._status["frame_id"],
+                    reason=failure_reason if self._status["status"] == "failed" else "source_stopped")
             # A still-running model belongs to the inference worker until it
             # exits; do not release its tensors underneath a model call.
             if models is not None and not (self.inference_thread and self.inference_thread.is_alive()):
                 models.release()
             self._publish({"type": "camera_status", "data": self.snapshot()}, loop)
+
+    def _observe_zoom(self, settings: Settings, stopped: threading.Event) -> None:
+        """Refresh calibrated idle magnification without owning lens movement."""
+        configured = bool(settings.camera_onvif_ptz_url and settings.camera_onvif_profile_token
+                          and settings.camera_onvif_zoom_calibration)
+        last_observation = object()
+        while not stopped.is_set() and not self.stop_event.is_set():
+            if not recording_manager.optical_control_busy():
+                context = recording_manager.zoom_observation_context()
+                factor = None
+                reason = "zoom_unknown"
+                if configured:
+                    try:
+                        factor = onvif_control.read_magnification()
+                        reason = "zoom_observed" if factor is not None else "zoom_unknown"
+                    except Exception:
+                        # A transient failure is not a permanent admission
+                        # failure. Keep the view unknown and retry at the next
+                        # bounded interval instead of assuming a 1x position.
+                        reason = "zoom_read_failed"
+                current_context = recording_manager.zoom_observation_context()
+                if (not stopped.is_set() and not self.stop_event.is_set()
+                        and not recording_manager.optical_control_busy()
+                        and current_context.get("generation") == context.get("generation")):
+                    recording_manager.observe_zoom_factor(factor, context.get("generation"))
+                    observation = (factor, reason)
+                    if observation != last_observation:
+                        record_event("zoom_observation", camera_id=self._status["camera_id"],
+                            session_id=self._status["session_id"], source_type="camera",
+                            generation=context.get("generation"), zoom_factor=factor, reason=reason)
+                        last_observation = observation
+            if stopped.wait(self.ZOOM_OBSERVATION_INTERVAL):
+                return
 
     def _inference_worker(self, *args) -> None:
         try:

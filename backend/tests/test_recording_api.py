@@ -116,6 +116,32 @@ def test_target_filter_can_be_saved_with_recording_disabled_without_onvif(record
     assert client.get("/api/recording/settings").json()["enabled"] is False
 
 
+def test_calibrated_optical_policy_can_be_enabled_offline_and_survives_restart(recording_client, monkeypatch):
+    from dataclasses import replace
+    from app import live_capture
+    from app.config import get_settings
+    client, manager = recording_client
+    settings = replace(get_settings(), camera_onvif_ptz_url="http://offline-camera/ptz",
+        camera_onvif_profile_token="profile", camera_onvif_zoom_calibration='{"1":0.1,"2":0.2,"3":0.3}')
+    monkeypatch.setattr(live_capture, "get_effective_settings", lambda: settings)
+    control = live_capture.OnvifControl()
+    monkeypatch.setattr(control, "_request", lambda *args: pytest.fail("Saving must not contact offline hardware"))
+    manager.set_zoom_controller(control)
+    response = client.put("/api/recording/settings", json={"enabled": True, "min_optical_zoom": 1.4, "target_height_ratio": .7})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert client.get("/api/recording/status").json()["active_id"] is None
+    events = client.get("/api/recording/events").json()["items"]
+    assert events[-1]["event"] == "recording_settings_changed"
+    assert events[-1]["enabled"] is True
+    assert events[-1]["min_optical_zoom"] == 1.4
+    restored = RecordingManager(manager.root)
+    assert restored.get_settings()["enabled"] is True
+    assert restored.get_settings()["target_height_ratio"] == .7
+    restored.executor.shutdown(wait=True)
+    restored.control_executor.shutdown(wait=True)
+
+
 def test_catalog_filters_media_ranges_and_delete(recording_client):
     client, manager = recording_client
     recording_id = create_event(manager)

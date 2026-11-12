@@ -31,6 +31,7 @@ const operationNote = computed(() => {
   if (props.status?.active_id && props.status.media_recording === false) return '目标离场，本轮视频已停止写入；镜头正在后台归位，等待过程不会继续录入空画面。'
   if (props.status?.zoom_recovery?.fallback_recording) return props.status.current_zoom_factor === 1 ? '已确认回到 1×，本轮继续保底录像至目标离场，本轮不再重复放大；保存后重新选船。' : props.status.zoom_recovery.active ? '镜头通信失败，本轮仍在保存实际画面；正在有限重试恢复 1×，不会把未确认的位置当作已到位。' : '镜头位置仍未确认，自动变焦已暂停；本轮继续保底录像至时长上限，等待后续位置复核。'
   if (props.status?.zoom_recovery?.active) return '正在有限重试恢复 1×；确认镜头位置后恢复自动选船。可停止采集取消恢复。'
+  if (props.status?.identity_fallback) return '放大后目标关联未确认，正在回到 1× 保留同一段原始视频并重新确认目标；本轮不再放大。全景仍无法确认时会保存视频并标记为中断。'
   if (props.status?.error) return `录制策略已开启，但当前异常已暂停录制：${props.status.error}`
   if (!sourceRunning.value) return props.sourceMode === 'camera'
     ? '录制策略已开启，正在等待现场视频源。恢复网络后请重新检查镜头能力，再启动摄像头采集；尚未采集时不会生成录像。'
@@ -97,7 +98,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <div class="adaptive-zoom-range"><label>最小倍率<el-input-number :model-value="modelValue.min_optical_zoom" :min="1.1" :max="40" :step=".1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('min_optical_zoom', Number($event))" /></label><label>最大倍率<el-input-number :model-value="modelValue.max_optical_zoom" :min="1.1" :max="40" :step=".5" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('max_optical_zoom', Number($event))" /></label></div>
           <p class="setting-hint">按稳定船高选择已标定档位，录制中锁定目标，倍率在冷却与滞回条件下受控更新。船体已足够大或放大会裁切时保留 1×，遮挡和档位不足时可能无法达到目标高度。</p>
         </template>
-        <div v-else class="optical-zoom-setting"><label>目标光学倍率</label><el-select v-if="magnifications.length" :model-value="modelValue.zoom_factor" :disabled="!loaded || saving" aria-label="目标光学倍率" @update:model-value="set('zoom_factor', Number($event))"><el-option v-for="factor in magnifications" :key="factor" :value="factor" :label="`${factor}×`" /></el-select><el-input-number v-else :model-value="modelValue.zoom_factor" :min="1.1" :max="40" :step=".5" :precision="1" :disabled="!loaded || saving" controls-position="right" aria-label="待标定目标光学倍率" @update:model-value="set('zoom_factor', Number($event))" /><span>回位固定为 1×</span></div>
+        <div v-else class="optical-zoom-setting"><label>目标光学倍率</label><el-select v-if="magnifications.length" :model-value="modelValue.zoom_factor" :disabled="!loaded || saving" aria-label="目标光学倍率" @update:model-value="set('zoom_factor', Number($event))"><el-option v-for="factor in magnifications" :key="factor" :value="factor" :label="`${factor}×`" /></el-select><el-input-number v-else :model-value="modelValue.zoom_factor" :min="1.1" :max="40" :step=".5" :precision="1" :disabled="!loaded || saving" controls-position="right" aria-label="待标定目标光学倍率" @update:model-value="set('zoom_factor', Number($event))" /><span>回位固定为 1×；目标偏离竖直视野时降低到安全档位，必要时用 1×</span></div>
         <div class="optical-capability" :class="{ ready }" role="status"><Camera :size="15" /><span>{{ capabilityNote }}</span><el-button text size="small" :loading="ptzBusy" aria-label="重新检查光学变焦能力" @click="emit('refresh-ptz')"><RefreshCw :size="13" /></el-button></div>
         <p v-if="!ready" class="setting-hint">离线时可以保存录制策略；恢复采集后仍需核验镜头能力，核验通过才会执行光学变焦。</p>
         <section class="adaptive-target-panel" aria-label="目标优先级与停泊排除">

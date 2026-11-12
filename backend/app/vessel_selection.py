@@ -81,10 +81,7 @@ class VesselTargetSelector:
     @staticmethod
     def plan_zoom(target, settings, calibrated_factors=None):
         height = max(.001, float(target["height_ratio"]))
-        if not settings.adaptive_zoom_enabled:
-            return {"zoom_factor": settings.zoom_factor, "requested_zoom_factor": settings.zoom_factor,
-                    "selection_reason": "fixed_zoom", "max_safe_zoom": settings.zoom_factor}
-        requested = settings.target_height_ratio / height
+        requested = settings.target_height_ratio / height if settings.adaptive_zoom_enabled else settings.zoom_factor
         box = target["box"]
         # Lens-only zoom is centred on the physical optical axis. A lower ship
         # must not silently disappear from the vertical field of view.
@@ -94,15 +91,17 @@ class VesselTargetSelector:
         # calibrated magnification and does not depend on the current width of
         # a partially entering bow.
         safe = max(1., .47 / edge)
-        limit = max(1., min(requested, settings.max_optical_zoom, safe))
+        ceiling = settings.max_optical_zoom if settings.adaptive_zoom_enabled else settings.zoom_factor
+        limit = max(1., min(requested, ceiling, safe))
         factors = sorted({float(f) for f in (calibrated_factors or [])
                           if isinstance(f, (int, float)) and math.isfinite(f) and f >= 1})
-        usable = [f for f in factors if settings.min_optical_zoom <= f <= limit + 1e-8]
+        minimum = settings.min_optical_zoom if settings.adaptive_zoom_enabled else 1.
+        usable = [f for f in factors if minimum <= f <= limit + 1e-8]
         zoom = max(usable, default=1.)
-        reason = "adaptive_calibrated"
+        reason = "adaptive_calibrated" if settings.adaptive_zoom_enabled else "fixed_zoom"
         if requested <= 1:
             reason = "already_large_enough"
-        elif safe + .01 < min(requested, settings.max_optical_zoom):
+        elif safe + .01 < min(requested, ceiling):
             reason = "off_axis_limited"
         elif not usable:
             reason = "no_safe_calibrated_zoom"

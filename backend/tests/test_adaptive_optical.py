@@ -266,3 +266,89 @@ def test_recovered_fallback_does_not_attempt_adaptive_zoom_again_in_the_same_cli
     harness.depart_with([])
     harness.manager.executor.submit(lambda: None).result(timeout=5)
     assert harness.manager.catalog[recording_id]["status"] == "interrupted"
+
+
+def test_grey_ship_with_new_tracker_id_is_reacquired_by_unique_repeated_geometry(harness_factory):
+    harness = harness_factory()
+    harness.warm()
+    target = ship()
+    recording_id = harness.start([target])
+    # Grayscale/IR crops produce no hue descriptor. A lens move can also
+    # change the upstream track ID: neither is evidence that the hull left.
+    assert harness.manager._locked_appearance is None
+    harness.manager.target_selector.tracks.clear()  # expired identity across a lens/view interruption
+    changed = projected(ship(99), 3)
+    for index in range(3):
+        state = harness.feed([changed], advance=.2)
+        if index < 2:
+            assert state["awaiting_zoomed_target"] is True
+    assert state["awaiting_zoomed_target"] is False
+    assert harness.manager.locked_target["ship_id"] == 99
+    assert harness.manager.catalog[recording_id]["target_reacquired"] is True
+    harness.depart_with([])
+
+
+def test_ambiguous_grey_hulls_never_rebind_and_keep_video_through_timeout(harness_factory):
+    harness = harness_factory(target_acquire_timeout_seconds=3)
+    harness.warm()
+    recording_id = harness.start([ship()])
+    first = projected(ship(98, x=.39), 3)
+    second = projected(ship(99, x=.41), 3)
+    for _ in range(17):
+        harness.feed([first, second], advance=.2)
+    harness.settle("zoomed")
+    for _ in range(17):
+        harness.feed([], advance=.2)
+    harness.settle("overview")
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    item = harness.manager.catalog[recording_id]
+    assert not item.get("target_reacquired")
+    assert item["reason"] == "target_not_reacquired"
+    assert item["status"] == "interrupted"
+    assert item["duration_seconds"] >= 3
+
+
+def test_fixed_zoom_does_not_crop_out_real_off_axis_target(harness_factory):
+    harness = harness_factory(adaptive_zoom_enabled=False, zoom_factor=5)
+    harness.warm()
+    recording_id = harness.start([ship(x=.538, y=.228, width=.314, height=.069)])
+    assert harness.manager.current_zoom_factor == 1
+    assert harness.manager.catalog[recording_id]["selection_reason"] == "off_axis_limited"
+    assert harness.lens.calls == [1, 1]
+
+
+def test_confirmed_ship_is_not_declared_departed_while_grey_hulls_overlap(harness_factory):
+    harness = harness_factory(target_acquire_timeout_seconds=3)
+    harness.warm()
+    recording_id = harness.start([ship()])
+    harness.feed([projected(ship(), 3)])
+    last_confirmed = harness.timestamp
+    for _ in range(7):
+        state = harness.feed([projected(ship(98, x=.39), 3), projected(ship(99, x=.41), 3)], advance=.2)
+        assert state["phase"] == "zoomed"
+        assert state["active_id"] == recording_id
+        assert harness.manager.locked_target["ship_id"] == 1
+    assert harness.manager.catalog[recording_id]["source_end_seconds"] > last_confirmed + 1
+
+
+def test_grey_reacquisition_compares_the_clipped_hull_in_the_zoomed_field(harness_factory):
+    harness = harness_factory()
+    harness.warm()
+    recording_id = harness.start([ship(x=.25, width=.55)])
+    harness.manager.target_selector.tracks.clear()
+    for _ in range(3):
+        state = harness.feed([projected(ship(99, x=.25, width=.55), 3)], advance=.2)
+    assert state["awaiting_zoomed_target"] is False
+    assert harness.manager.catalog[recording_id]["target_reacquired"] is True
+
+
+def test_conflicting_hull_color_cannot_use_the_geometry_only_fallback(harness_factory):
+    harness = harness_factory()
+    harness.image[:] = (0, 0, 220)
+    harness.warm()
+    recording_id = harness.start([ship()])
+    harness.image[:] = (220, 0, 0)
+    for _ in range(5):
+        state = harness.feed([projected(ship(99), 3)], advance=.2)
+    assert state["awaiting_zoomed_target"] is True
+    assert harness.manager.catalog[recording_id]["target_reacquired"] is False

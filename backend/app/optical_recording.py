@@ -54,6 +54,11 @@ class OpticalCycleMixin:
         self._last_zoom_adjust = None
         self._locked_appearance = None
         self._initial_target_height = None
+        self._reacquire_candidate = None
+        self._association_uncertain = False
+        self._association_lost_since = None
+        self._identity_fallback_active = False
+        self._return_for_identity = False
         self._media_pending = deque()
         self._media_pending_bytes = 0
         self._media_last_target = None
@@ -384,7 +389,11 @@ class OpticalCycleMixin:
                 self._mark_closed_cycle_returned()
                 if self.active:
                     self.catalog[self.active["id"]]["returned_to_overview"] = True
-                if self._cycle_halt or self._cycle_no_more_frames:
+                if self._return_for_identity and not self._cycle_halt and not self._cycle_no_more_frames:
+                    self._return_for_identity = False
+                    self._active_zoom_factor = 1.
+                    self._phase("zoomed")
+                elif self._cycle_halt or self._cycle_no_more_frames:
                     self._finish(self._cycle_exit_reason)
                     self._phase("error" if self.error else "overview")
                     self._optical_session = False
@@ -439,6 +448,11 @@ class OpticalCycleMixin:
         self._active_zoom_factor = None
         self._locked_appearance = None
         self._initial_target_height = None
+        self._reacquire_candidate = None
+        self._association_uncertain = False
+        self._association_lost_since = None
+        self._identity_fallback_active = False
+        self._return_for_identity = False
         self._clear_optical_media()
         self._media_last_target = None
         self._media_target_box = None
@@ -518,8 +532,8 @@ class OpticalCycleMixin:
             if isinstance(track_id, int) and track_id not in item["track_ids"]:
                 item["track_ids"].append(track_id)
 
-    def _consistent_locked_target(self, target):
-        if not self.locked_target or target.get("identity_ambiguous"):
+    def _consistent_locked_target(self, target, *, allow_ambiguous=False):
+        if not self.locked_target or target.get("identity_ambiguous") and not allow_ambiguous:
             return False
         previous, current = self.locked_target["box"], target["box"]
         old_y, new_y = (previous[1] + previous[3]) / 2, (current[1] + current[3]) / 2
@@ -531,15 +545,42 @@ class OpticalCycleMixin:
         similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
         return similarity is None or similarity >= .3
 
-    def _find_locked_target(self):
+    def _geometric_reacquisition(self, target, *, allow_ambiguous=False):
+        """Compare visible hulls in the SAME reference plane, including cropping.
+
+        Grey/IR hulls have no useful hue histogram. A new tracker ID can still
+        be confirmed by unique, repeated geometry, never by the ID alone.
+        """
+        if not self._consistent_locked_target(target, allow_ambiguous=allow_ambiguous):
+            return False
+        zoom = float(self.current_zoom_factor or 1.)
+        low, high = .5 - .5 / zoom, .5 + .5 / zoom
+        old = self.locked_target["box"]
+        expected = (max(low, old[0]), max(low, old[1]), min(high, old[2]), min(high, old[3]))
+        box = target["box"]
+        ew, eh = expected[2] - expected[0], expected[3] - expected[1]
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        if min(ew, eh, bw, bh) <= 0:
+            return False
+        intersection = max(0., min(expected[2], box[2]) - max(expected[0], box[0])) * max(0., min(expected[3], box[3]) - max(expected[1], box[1]))
+        overlap = intersection / max(1e-9, ew * eh + bw * bh - intersection)
+        return overlap >= .5 and .65 <= bh / eh <= 1.6
+
+    def _find_locked_target(self, timestamp):
+        self._association_uncertain = False
         targets = self.adaptive_selection["targets"]
         direct = next((target for target in targets if self.locked_target and target["target_id"] == self.locked_target["target_id"]), None)
-        if direct and self._consistent_locked_target(direct):
+        # A geometric assignment can give one of two overlapping grey hulls
+        # the old selector ID. Do not treat that ID as a resolved identity.
+        grey_competitor = (direct is not None and self._locked_appearance is None
+            and any(target is not direct and self._geometric_reacquisition(target, allow_ambiguous=True)
+                    for target in targets))
+        if direct and self._consistent_locked_target(direct) and not grey_competitor:
+            self._reacquire_candidate = None
             return direct
-        # Rebind after tracker ID churn only with a distinctive appearance AND
-        # consistent wide-view geometry. Ambiguous monochrome/occluded targets
-        # are returned to overview instead of handing the lens to another ship.
-        matches = []
+        # Use distinctive appearance, or unique, repeatedly observed reference
+        # geometry when hue is unavailable. Ambiguity never changes identity.
+        matches, geometric = [], []
         for target in targets:
             if target["motion_state"] == "stationary" or not self._consistent_locked_target(target):
                 continue
@@ -547,9 +588,28 @@ class OpticalCycleMixin:
             similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
             if similarity is not None and similarity >= .65:
                 matches.append((similarity, target))
+            elif similarity is None and self._geometric_reacquisition(target):
+                geometric.append(target)
         matches.sort(key=lambda pair: pair[0], reverse=True)
         if matches and (len(matches) == 1 or matches[0][0] - matches[1][0] >= .15):
+            self._reacquire_candidate = None
             return matches[0][1]
+        self._association_uncertain = bool(matches or geometric or direct or any(
+            target.get("identity_ambiguous") and self._geometric_reacquisition(target, allow_ambiguous=True)
+            for target in targets))
+        if len(geometric) == 1 and not matches and not direct:
+            target = geometric[0]
+            pending = self._reacquire_candidate
+            if pending is None or pending["target_id"] != target["target_id"] or timestamp - pending["last"] > 2.5:
+                pending = {"target_id": target["target_id"], "since": timestamp, "hits": 0}
+            pending.update(last=timestamp, hits=pending["hits"] + 1)
+            self._reacquire_candidate = pending
+            if pending["hits"] >= 3 and timestamp - pending["since"] >= .3:
+                self._reacquire_candidate = None
+                self._association_uncertain = False
+                return target
+        else:
+            self._reacquire_candidate = None
         if direct:
             self._cycle_exit_reason = "target_ambiguous"
         return None
@@ -589,7 +649,13 @@ class OpticalCycleMixin:
                 self._halt_optical("cycle_timeout")
                 return
             if not self.active.get("media_stopped"):
-                self._queue_optical_media(image, timestamp)
+                # Before first acquisition (and during lens motion) absence of
+                # an identity is NOT proof of departure. Stream actual frames
+                # straight to disk rather than dropping a bounded JPEG cache.
+                if not self._zoomed_ship_seen and self._zoom_failure_kind != "transport":
+                    self._write_frame(image, timestamp)
+                else:
+                    self._queue_optical_media(image, timestamp)
                 if self.phase != "zoomed" or self._zoom_failure_kind == "transport":
                     observed = self._positive_unconfirmed_target(image, vessels, observation_context)
                     if observed:
@@ -622,6 +688,8 @@ class OpticalCycleMixin:
             return
         if self._cycle_halt or self.error or self.phase not in {"overview", "zoomed"}:
             return
+        if self.phase == "overview" and self.active is None:
+            self._buffer_frame(timestamp, image)
         fresh = vessels is not None and (observation_context is None or
             observation_context.get("generation") == self._cycle_generation and observation_context.get("phase") == self.phase and observation_context.get("accept_detections") is True)
         if not fresh:
@@ -638,13 +706,16 @@ class OpticalCycleMixin:
             self._pending_target_id = candidate_id
             if self.hits < policy.min_hits:
                 return
-            self._clear_buffer()
             self._cycle_policy = self.settings.model_copy(deep=True)
             self._cycle_exit_reason = "vessel_left"
             self.locked_target = {key: value for key, value in candidate.items() if key not in {"boxes", "vessel", "assets"}}
             self._active_zoom_factor = self.adaptive_selection["zoom_factor"]
             self._locked_appearance = self.target_selector.tracks[candidate_id].appearance
             self._initial_target_height = candidate["height_ratio"]
+            self._reacquire_candidate = None
+            self._association_lost_since = None
+            self._identity_fallback_active = False
+            self._return_for_identity = False
             self._last_zoom_adjust = timestamp
             self._start(image, fps, timestamp, single=True)
             self._clear_optical_media()
@@ -657,15 +728,21 @@ class OpticalCycleMixin:
                         optical_zoom_factor=self._active_zoom_factor, initial_optical_zoom_factor=self._active_zoom_factor,
                         returned_to_overview=False, zoom_events=[], target_id=candidate_id,
                         target_height_ratio=candidate["height_ratio"], selection_reason=self.adaptive_selection["selection_reason"],
-                        adaptive_zoom=policy.adaptive_zoom_enabled, target_decision=dict(self.locked_target))
+                        requested_zoom_factor=self.adaptive_selection["requested_zoom_factor"],
+                        adaptive_zoom=policy.adaptive_zoom_enabled, target_reacquired=False, target_decision=dict(self.locked_target))
             self._record_optical_attributes([candidate])
+            for sample_timestamp, encoded in self.buffer:
+                decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    self._write_frame(decoded, sample_timestamp)
+            self._clear_buffer()
             self._write_frame(image, timestamp)
             # Open the file and write the triggering full-view frame FIRST.
             self._command_zoom(self._active_zoom_factor, "zooming_in")
         else:
             if self._zoomed_since is None:
                 self._zoomed_since = timestamp
-            target = self._find_locked_target()
+            target = self._find_locked_target(timestamp)
             if target:
                 self.locked_target = {**self.locked_target, **target}
                 observed_vessel = self.target_selector.tracks[target["target_id"]].vessel
@@ -673,16 +750,20 @@ class OpticalCycleMixin:
                 self._record_optical_attributes([observed_vessel])
                 self._zoomed_ship_seen = True
                 self._empty_since = None
+                self._association_lost_since = None
+                self.catalog[self.active["id"]]["target_reacquired"] = True
+                if self._cycle_exit_reason == "target_ambiguous":
+                    self._cycle_exit_reason = "vessel_left"
                 if policy.suppress_stationary and target["motion_state"] == "stationary":
                     self._cycle_exit_reason = "target_stationary"
                     self._seal_optical_media(timestamp, "target_stationary")
                     self._command_zoom(1., "zooming_out")
                     return
-                if not self._zoom_fallback_active and policy.adaptive_zoom_enabled and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
+                if not self._zoom_fallback_active and not self._identity_fallback_active and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
                     plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
                     next_zoom, current = plan["zoom_factor"], actual_zoom
-                    should_reduce = next_zoom < current and (target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)
-                    should_increase = next_zoom > current and plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis)
+                    should_reduce = next_zoom < current and (policy.adaptive_zoom_enabled and target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)
+                    should_increase = policy.adaptive_zoom_enabled and next_zoom > current and plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis)
                     if should_reduce or should_increase:
                         self._last_zoom_adjust = timestamp
                         self._active_zoom_factor = next_zoom
@@ -691,17 +772,31 @@ class OpticalCycleMixin:
                         item.setdefault("zoom_decisions", []).append({"source_seconds": timestamp, "height_ratio": target["height_ratio"], **plan})
                         self._command_zoom(next_zoom, "zooming_in")
                         return
-            elif not self._zoomed_ship_seen:
+            elif not self._zoomed_ship_seen or self._association_uncertain:
                 # At first detection in the wide view, the bow can still be
                 # outside the narrower zoomed FOV. Wait for it to arrive before
                 # an empty zoomed frame can mean that the stern has departed.
                 self._empty_since = None
-                if timestamp - self._zoomed_since >= policy.target_acquire_timeout_seconds:
-                    self._cycle_exit_reason = "target_not_reacquired"
-                    self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds,
-                        "target_not_reacquired")
+                self._flush_optical_media(timestamp)
+                if self._association_lost_since is None:
+                    self._association_lost_since = self._zoomed_since if not self._zoomed_ship_seen else timestamp
+                if timestamp - self._association_lost_since >= policy.target_acquire_timeout_seconds:
+                    if actual_zoom > 1 and not self._identity_fallback_active:
+                        # A narrower view can hide the bow or break matching.
+                        # Keep this file open and try the original panorama
+                        # once, with a fresh bounded acquisition window.
+                        self._identity_fallback_active = True
+                        self._return_for_identity = True
+                        self._association_lost_since = None
+                        self._reacquire_candidate = None
+                        self.catalog[self.active["id"]]["identity_fallback"] = True
+                        self._command_zoom(1., "zooming_out")
+                        return
+                    self._cycle_exit_reason = "target_ambiguous" if self._zoomed_ship_seen else "target_not_reacquired"
+                    self._seal_optical_media(timestamp, self._cycle_exit_reason)
                     self._command_zoom(1., "zooming_out")
             elif self._empty_since is None:
+                self._association_lost_since = None
                 self._empty_since = timestamp
             elif timestamp - self._empty_since >= policy.departure_confirm_seconds:
                 self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds, "vessel_left")

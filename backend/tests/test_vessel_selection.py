@@ -79,6 +79,15 @@ def test_ship_near_vertical_edge_is_not_zoomed_out_of_the_fixed_optical_view():
     assert result["selection_reason"]
 
 
+@pytest.mark.parametrize("y,height,expected", [(.228, .069, 1), (.30, .10, 2), (.45, .10, 3)])
+def test_fixed_zoom_respects_vertical_visibility_and_uses_only_calibrated_steps(y, height, expected):
+    result = update(VesselTargetSelector(), [ship(y=y, height=height)],
+                    config=settings(adaptive_zoom_enabled=False, zoom_factor=3), factors=[1, 2, 3])
+    assert result["zoom_factor"] == expected
+    assert result["requested_zoom_factor"] == 3
+    assert result["selection_reason"] == ("fixed_zoom" if expected == 3 else "off_axis_limited")
+
+
 def test_nearest_candidate_is_the_largest_apparent_height_and_not_the_widest_ship():
     result = update(VesselTargetSelector(), [
         ship(1, x=.05, width=.7, height=.1),

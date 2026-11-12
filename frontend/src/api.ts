@@ -231,6 +231,7 @@ export interface RecordingStatus {
   cycle_count?: number
   zoom_driver?: 'optical' | 'digital' | null
   awaiting_zoomed_target?: boolean
+  identity_fallback?: boolean
   adaptive_selection?: AdaptiveSelection | null
   locked_target?: AdaptiveTarget | null
   zoom_recovery?: { active: boolean; failure_kind: string | null; attempts: number; fallback_recording: boolean; retry_in_seconds: number | null }
@@ -264,6 +265,8 @@ export interface RecordingItem {
   zoom_factor?: number
   settings?: Partial<RecordingSettings>
   target_id?: number | string
+  identity_fallback?: boolean
+  target_reacquired?: boolean
   target_height_ratio?: number
   selection_reason?: string
   adaptive_zoom?: boolean

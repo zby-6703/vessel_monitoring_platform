@@ -117,7 +117,7 @@ class CycleHarness:
 
 def ship():
     return {"ship_id": 1, "ship_name": "海泰52", "confidence": .95,
-            "boxes": [{"type": "ship", "xywh": [4, 8, 50, 28], "confidence": .95}]}
+            "boxes": [{"type": "ship", "xywh": [4, 20, 50, 8], "confidence": .95}]}
 
 
 def test_cycle_api_streams_one_mp4_with_seek_support(cycle_factory, monkeypatch):
@@ -568,6 +568,69 @@ def test_empty_zoomed_view_waits_for_the_bow_before_detecting_stern_departure(cy
     harness.manager.executor.submit(lambda: None).result(timeout=5)
     assert harness.manager.catalog[recording_id]["status"] == "completed"
     assert harness.controller.calls == [1, 3, 1]
+
+
+def test_unconfirmed_target_keeps_the_waiting_video_instead_of_a_subsecond_stub(cycle_factory):
+    harness = cycle_factory(real_video=True, target_acquire_timeout_seconds=3)
+    harness.warm()
+    harness.feed([ship()])
+    recording_id = harness.manager.status()["active_id"]
+    harness.phase("zoomed")
+    for _ in range(75):
+        harness.feed([], advance=.1)
+    harness.phase("overview")
+    harness.manager.executor.submit(lambda: None).result(timeout=15)
+    item = harness.manager.catalog[recording_id]
+    assert item["reason"] == "target_not_reacquired"
+    assert item["status"] == "interrupted"
+    assert item["duration_seconds"] >= 6
+    cap = cv2.VideoCapture(str(harness.manager.media_path(recording_id, "cycle")))
+    pixels = []
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        pixels.append(float(frame.mean()))
+    cap.release()
+    assert len(pixels) >= 60
+    assert pixels[-1] - pixels[0] > 15  # real later frames survived, not padding of the trigger
+
+
+def test_panorama_reacquisition_continues_same_file_until_confirmed_departure(cycle_factory):
+    harness = cycle_factory(target_acquire_timeout_seconds=3)
+    harness.warm()
+    harness.feed([ship()])
+    recording_id = harness.manager.status()["active_id"]
+    harness.phase("zoomed")
+    for _ in range(35):
+        harness.feed([], advance=.1)
+    harness.phase("zoomed")
+    assert harness.manager.current_zoom_factor == 1
+    assert harness.manager.status()["identity_fallback"] is True
+    assert harness.manager.status()["active_id"] == recording_id
+    harness.feed([ship()])
+    assert harness.manager.status()["awaiting_zoomed_target"] is False
+    harness.depart()
+    harness.phase("overview")
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
+    item = harness.manager.catalog[recording_id]
+    assert item["status"] == "completed"
+    assert item["identity_fallback"] is True
+    assert item["duration_seconds"] > 3
+    assert len(harness.manager.catalog) == 1
+    assert harness.controller.calls.count(3) == 1
+
+
+def test_optical_cycle_includes_bounded_panorama_preroll(cycle_factory):
+    harness = cycle_factory(pre_roll_seconds=1)
+    harness.warm()
+    for _ in range(20):
+        harness.feed([], advance=.1)
+    trigger = harness.timestamp + .1
+    recording_id = harness.start_cycle()
+    item = harness.manager.catalog[recording_id]
+    assert .8 <= trigger - item["source_start_seconds"] <= 1.01
+    assert item["duration_seconds"] >= 1
 
 
 @pytest.mark.parametrize("operation", ["finish", "disable"])

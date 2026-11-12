@@ -408,7 +408,7 @@ class RecordingManager(OpticalCycleMixin):
         record_event("recording_encoding", recording_id=item["id"], camera_id=self.camera_id,
             session_id=self.session_id, recording_mode=item["recording_mode"], reason=reason)
         _atomic_json(self.root / item["id"] / "manifest.json", item)
-        interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed"}
+        interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed", "target_not_reacquired", "target_ambiguous", "target_evidence_timeout"}
         if item.get("recording_mode") == "optical_cycle" and not item.get("returned_to_overview"):
             interrupted = True
         if item.get("zoom_fallback"):
@@ -529,6 +529,7 @@ class RecordingManager(OpticalCycleMixin):
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
                     "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
+                    "identity_fallback": bool(self.active and self._identity_fallback_active),
                     "zoom_recovery": {"active": self.phase == "recovering", "failure_kind": self._zoom_failure_kind,
                         "attempts": self._zoom_recovery_attempts, "fallback_recording": bool(self.active and not self.active.get("media_stopped") and self._zoom_fallback_active),
                         "retry_in_seconds": max(0., self._zoom_recovery_due - time.monotonic()) if self._zoom_recovery_due is not None else None},

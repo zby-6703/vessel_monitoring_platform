@@ -119,17 +119,17 @@ def test_settings_are_opt_in_validated_and_persisted(tmp_path: Path):
 
 def test_larger_adaptive_defaults_apply_to_new_and_missing_settings(tmp_path):
     manager = RecordingManager(tmp_path)
-    assert manager.get_settings()["min_optical_zoom"] == 4
+    assert manager.get_settings()["min_optical_zoom"] == 3
     assert manager.get_settings()["zoom_factor"] == 4
-    assert manager.get_settings()["target_height_ratio"] == .70
+    assert manager.get_settings()["target_height_ratio"] == 1
     # Deployments saved before adaptive settings were introduced also receive
     # these defaults without changing their explicit recording preference.
     manager.settings_path.write_text(json.dumps({"enabled": False}), encoding="utf-8")
     restored = RecordingManager(tmp_path).get_settings()
     assert restored["enabled"] is False
-    assert restored["min_optical_zoom"] == 4
+    assert restored["min_optical_zoom"] == 3
     assert restored["zoom_factor"] == 4
-    assert restored["target_height_ratio"] == .70
+    assert restored["target_height_ratio"] == 1
 
 
 def test_larger_defaults_preserve_explicit_deployment_values(tmp_path):
@@ -157,6 +157,7 @@ def test_larger_target_height_uses_a_larger_existing_safe_calibrated_stop():
     {"min_hits": 0},
     {"confidence_threshold": 1.1},
     {"zoom_factor": .5},
+    {"target_height_ratio": 1.01},
     {"center_x": 1.1},
     {"center_y": -.1},
     {"focus_mode": "unsupported"},

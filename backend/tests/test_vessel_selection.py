@@ -88,12 +88,13 @@ def test_fixed_zoom_respects_vertical_visibility_and_uses_only_calibrated_steps(
     assert result["selection_reason"] == ("fixed_zoom" if expected == 3 else "off_axis_limited")
 
 
-@pytest.mark.parametrize("height,y,expected", [(.2, .4, 4), (.1, .45, 6), (.07, .465, 8), (.1, .3, 1)])
-def test_detail_zoom_floor_uses_four_or_higher_when_the_view_allows(height, y, expected):
+@pytest.mark.parametrize("height,y,expected", [(.25, .375, 3), (.2, .4, 4), (.1, .45, 8), (.07, .465, 8), (.1, .3, 1)])
+def test_default_detail_zoom_aims_for_full_height_with_three_x_floor(height, y, expected):
     result = update(VesselTargetSelector(), [ship(y=y, height=height)],
                     config=RecordingSettings(suppress_stationary=False), factors=[1, 2, 3, 4, 6, 8])
     assert result["zoom_factor"] == expected
-    assert result["zoom_factor"] not in (2, 3)
+    assert result["requested_zoom_factor"] == pytest.approx(1 / height)
+    assert result["zoom_factor"] != 2
 
 
 def test_nearest_candidate_is_the_largest_apparent_height_and_not_the_widest_ship():

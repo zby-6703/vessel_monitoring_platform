@@ -38,8 +38,8 @@ class RecordingSettings(BaseModel):
     zoom_settle_timeout_seconds: float = Field(default=15, ge=3, le=60)
     overview_settle_seconds: float = Field(default=.5, ge=0, le=5)
     adaptive_zoom_enabled: bool = True
-    target_height_ratio: float = Field(default=.70, ge=.15, le=.9)
-    min_optical_zoom: float = Field(default=4, ge=1.1, le=40)
+    target_height_ratio: float = Field(default=1., ge=.15, le=1.)
+    min_optical_zoom: float = Field(default=3, ge=1.1, le=40)
     max_optical_zoom: float = Field(default=8, ge=1.1, le=40)
     suppress_stationary: bool = True
     stationary_seconds: float = Field(default=15, ge=3, le=600)

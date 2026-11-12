@@ -104,6 +104,7 @@ def test_target_filter_can_be_saved_with_recording_disabled_without_onvif(record
     manager.set_zoom_controller(OfflineLens())
     values = {
         "enabled": False, "target_filter_enabled": True,
+        "target_height_ratio": 1., "min_optical_zoom": 3,
         "min_target_height_ratio": .08, "min_target_width_ratio": .15,
         "target_confirm_hits": 4, "target_confirm_seconds": .6,
         "target_roi_left": 0, "target_roi_top": .2,

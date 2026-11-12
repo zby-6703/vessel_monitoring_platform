@@ -2,8 +2,14 @@
 *.log
 
 # Local datasets, generated results, media assets, and model packages.
-# They are deliberately not versioned.
-assets/
+# Only the four README screenshots are versioned under assets/vis/.
+assets/*
+!assets/vis/
+assets/vis/*
+!assets/vis/平台运行界面图3.png
+!assets/vis/平台运行界面图4.png
+!assets/vis/平台运行界面图5.png
+!assets/vis/平台运行界面图6.png
 data/
 models/*
 !models/README.md

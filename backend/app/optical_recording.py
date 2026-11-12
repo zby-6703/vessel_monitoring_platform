@@ -763,7 +763,7 @@ class OpticalCycleMixin:
                     plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
                     next_zoom, current = plan["zoom_factor"], actual_zoom
                     should_reduce = next_zoom < current and (policy.adaptive_zoom_enabled and target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)
-                    should_increase = policy.adaptive_zoom_enabled and next_zoom > current and plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis)
+                    should_increase = policy.adaptive_zoom_enabled and next_zoom > current and (current < policy.min_optical_zoom or plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis))
                     if should_reduce or should_increase:
                         self._last_zoom_adjust = timestamp
                         self._active_zoom_factor = next_zoom

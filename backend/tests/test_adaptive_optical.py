@@ -352,3 +352,15 @@ def test_conflicting_hull_color_cannot_use_the_geometry_only_fallback(harness_fa
         state = harness.feed([projected(ship(99), 3)], advance=.2)
     assert state["awaiting_zoomed_target"] is True
     assert harness.manager.catalog[recording_id]["target_reacquired"] is False
+
+
+def test_safe_view_restores_detail_floor_even_when_height_suggestion_is_lower(harness_factory):
+    harness = harness_factory(min_optical_zoom=4, target_height_ratio=.7, zoom_adjust_cooldown_seconds=1)
+    harness.lens.available_magnifications = lambda: [1, 2, 3, 4, 6, 8]
+    harness.warm()
+    recording_id = harness.start([ship(y=.36)])
+    assert harness.manager.current_zoom_factor == 1  # vertical margin cannot fit 4x yet
+    harness.feed([ship(y=.39)], advance=1.2)
+    harness.settle("zoomed")
+    assert harness.manager.current_zoom_factor == 4
+    assert harness.manager.status()["active_id"] == recording_id

@@ -119,14 +119,16 @@ def test_settings_are_opt_in_validated_and_persisted(tmp_path: Path):
 
 def test_larger_adaptive_defaults_apply_to_new_and_missing_settings(tmp_path):
     manager = RecordingManager(tmp_path)
-    assert manager.get_settings()["min_optical_zoom"] == 1.4
+    assert manager.get_settings()["min_optical_zoom"] == 4
+    assert manager.get_settings()["zoom_factor"] == 4
     assert manager.get_settings()["target_height_ratio"] == .70
     # Deployments saved before adaptive settings were introduced also receive
     # these defaults without changing their explicit recording preference.
     manager.settings_path.write_text(json.dumps({"enabled": False}), encoding="utf-8")
     restored = RecordingManager(tmp_path).get_settings()
     assert restored["enabled"] is False
-    assert restored["min_optical_zoom"] == 1.4
+    assert restored["min_optical_zoom"] == 4
+    assert restored["zoom_factor"] == 4
     assert restored["target_height_ratio"] == .70
 
 
@@ -145,9 +147,8 @@ def test_larger_target_height_uses_a_larger_existing_safe_calibrated_stop():
     updated = VesselTargetSelector.plan_zoom(target, RecordingSettings(), factors)
     previous = VesselTargetSelector.plan_zoom(target, RecordingSettings(target_height_ratio=.55, min_optical_zoom=1.1), factors)
     assert previous["zoom_factor"] == 2
-    assert updated["zoom_factor"] == 3
+    assert updated["zoom_factor"] == 4
     assert updated["zoom_factor"] in factors
-    assert 1.4 not in factors
 
 
 @pytest.mark.parametrize("values", [

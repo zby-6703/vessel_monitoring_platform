@@ -92,7 +92,10 @@ class VesselTargetSelector:
         # a partially entering bow.
         safe = max(1., .47 / edge)
         ceiling = settings.max_optical_zoom if settings.adaptive_zoom_enabled else settings.zoom_factor
-        limit = max(1., min(requested, ceiling, safe))
+        # Detail recognition needs the configured optical floor even when
+        # hull-height sizing suggests less. Visibility still limits the move.
+        desired = max(requested, settings.min_optical_zoom) if settings.adaptive_zoom_enabled else requested
+        limit = max(1., min(desired, ceiling, safe))
         factors = sorted({float(f) for f in (calibrated_factors or [])
                           if isinstance(f, (int, float)) and math.isfinite(f) and f >= 1})
         minimum = settings.min_optical_zoom if settings.adaptive_zoom_enabled else 1.

@@ -162,12 +162,12 @@ class RealtimeTargetProcessor:
         live = [self._live_vessel(vessel) for vessel in result.vessels]
         background = self.background.update(image, live, timestamp, generation=generation)
         selected = self.selector.update(live, result.image_width, result.image_height, timestamp,
-            settings, zoom_factor=zoom, camera_motion=background, image=image)
+            settings, zoom_factor=zoom, camera_motion=background, image=image, view_offset=context.get("pan_offset", 0.))
         targets = list(selected["targets"])
         candidates = []
         seen_keys = set()
         for index, (vessel, live_vessel) in enumerate(zip(result.vessels, live)):
-            box = self.selector.detection_box(live_vessel, result.image_width, result.image_height, zoom)
+            box = self.selector.detection_box(live_vessel, result.image_width, result.image_height, zoom, context.get("pan_offset", 0.))
             source_box = self.selector.detection_box(live_vessel, result.image_width, result.image_height)
             matches = [target for target in targets if target["target_id"] not in seen_keys
                        and target["ship_id"] == live_vessel["ship_id"]]

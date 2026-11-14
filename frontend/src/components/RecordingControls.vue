@@ -19,7 +19,7 @@ function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettin
 const optical = computed(() => props.modelValue.recording_mode === 'optical_cycle')
 const magnifications = computed(() => (props.ptz?.magnifications || []).filter((factor) => factor > 1 && factor <= 40).sort((a, b) => a - b))
 const availableMagnifications = computed(() => magnifications.value.filter((factor) => factor >= props.modelValue.min_optical_zoom && factor <= props.modelValue.max_optical_zoom))
-const ready = computed(() => Boolean(props.ptz?.cycle_supported && (props.modelValue.adaptive_zoom_enabled ? availableMagnifications.value.length > 0 : magnifications.value.some((factor) => Math.abs(factor - props.modelValue.zoom_factor) < .001))))
+const ready = computed(() => Boolean(props.ptz?.cycle_supported && (!props.modelValue.auto_horizontal_follow || props.ptz.horizontal_follow_supported) && (props.modelValue.adaptive_zoom_enabled ? availableMagnifications.value.length > 0 : magnifications.value.some((factor) => Math.abs(factor - props.modelValue.zoom_factor) < .001))))
 const roiValid = computed(() => props.modelValue.target_roi_left < props.modelValue.target_roi_right && props.modelValue.target_roi_top < props.modelValue.target_roi_bottom)
 // Saving a locally valid policy does not require a currently reachable lens.
 // The backend validates calibration; movement validates hardware again.
@@ -42,9 +42,9 @@ const operationNote = computed(() => {
     ? '现场采集与自动录制已开启：先确认 1× 全景，再对符合条件的移动船舶启动循环。'
     : '视频采集与自动录制已开启，等待符合条件的船舶触发。'
 })
-const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
-const activeStep = computed(() => ({ overview: 0, initializing: 0, zooming_in: 1, zoomed: 2, zooming_out: 3, rearming: 4, recovering: 3, error: -1 }[props.status?.phase || 'overview']))
-const stages = computed(() => ['1× 观察移动目标 / 近船优先', props.modelValue.adaptive_zoom_enabled ? '锁定目标 / 自适应放大' : '锁定目标 / 指定倍率', '目标船头至船尾经过', '目标离场 / 回 1×', '保存一段 / 重新选船'])
+const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'waiting_body', 'panning', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
+const activeStep = computed(() => ({ overview: 0, initializing: 0, waiting_body: 1, panning: 2, zooming_in: 1, zoomed: 2, zooming_out: 3, rearming: 4, recovering: 3, error: -1 }[props.status?.phase || 'overview']))
+const stages = computed(() => ['1× 观察移动目标 / 近船优先', '主体入画 / 水平跟随 / 放大', '目标船头至船尾经过', '目标离场 / 回原机位', '保存一段 / 重新选船'])
 const stateLabel = computed(() => props.status ? props.status.state === 'disabled' ? '录制已关闭' : props.sourceStatus === 'reconnecting' ? '链路中断 · 自动重连' : props.status.active_id && props.status.media_recording === false ? '录像已结束 · 镜头归位中' : props.status.zoom_recovery?.fallback_recording ? '保底录制 · 镜头恢复' : props.status.zoom_recovery?.active ? '正在恢复镜头' : props.status.state === 'error' ? '录制异常' : !sourceRunning.value ? '已开启 · 等待视频源' : optical.value && props.sourceMode === 'camera' ? cyclePhaseLabel(props.status.phase, props.status.awaiting_zoomed_target) : { armed: '待船触发', recording: '正在录制' }[props.status.state] : '正在读取状态')
 const storagePercent = computed(() => Math.min(100, (props.status?.storage_bytes || 0) / (props.modelValue.max_storage_gb * 1024 ** 3) * 100))
 const capabilityNote = computed(() => props.ptz?.zoom_error || props.ptz?.error || (!props.ptz ? '正在读取摄像头光学变焦能力' : !props.ptz.absolute_zoom_supported ? '摄像头尚未确认支持绝对光学变焦' : !props.ptz.calibrated ? '请先在服务端完成 1× 与目标倍率的镜头位置标定' : !ready.value ? props.modelValue.adaptive_zoom_enabled ? '设置范围内暂无已标定的放大档位' : '所选倍率未标定，请选择已标定倍率' : props.modelValue.adaptive_zoom_enabled ? `自适应可用档位：${availableMagnifications.value.map((factor) => `${factor}×`).join(' / ')}` : '绝对光学变焦与倍率标定已就绪'))
@@ -96,10 +96,34 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
         </el-collapse>
       </section>
       <el-radio-group :model-value="modelValue.recording_mode" :disabled="!loaded || saving" class="focus-mode-options recording-mode-options" aria-label="录制工作模式" @update:model-value="set('recording_mode', $event as 'optical_cycle' | 'passage')"><el-radio-button value="optical_cycle">光学变焦循环</el-radio-button><el-radio-button value="passage">数字取景录制</el-radio-button></el-radio-group>
-      <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? '观察并选择可录制的目标后开始，镜头缩回 1× 后保存为一个视频，再重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
+      <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? '先录制全景，等待船体完整入画再放大；按已开启的水平策略跟随，回到原机位后重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
       <p class="setting-hint recording-operation-note" role="status">{{ operationNote }}</p>
       <p v-if="status?.error" class="recording-error" role="alert">{{ status.error }}</p>
       <template v-if="optical">
+        <section class="realtime-recognition" aria-label="自动左右跟随与入画等待">
+          <div class="recognition-toggle"><strong>自动左右跟随船舶</strong><el-switch :model-value="modelValue.auto_horizontal_follow" :disabled="!loaded || saving" aria-label="自动左右跟随船舶" @update:model-value="set('auto_horizontal_follow', Boolean($event))" /></div>
+          <p class="setting-hint">锁定同一艘船，根据船体偏离画面中心的程度小步左右修正，仅做水平跟随，不主动调整上下取景；结束后回到原水平机位。开关变化会结束当前轮并重新初始化。</p>
+          <p v-if="modelValue.auto_horizontal_follow && ptz && !ptz.horizontal_follow_supported" class="recording-error">尚未确认设备支持 FOV 水平跟随与绝对位置反馈，请重新检查镜头能力。</p>
+          <p v-if="status?.horizontal_follow?.limited" class="setting-hint">已达到水平跟随范围，本轮继续录像并等待目标离场。</p>
+          <div class="recognition-toggle"><strong>主体完整入画后再放大</strong><el-switch :model-value="modelValue.wait_full_body" :disabled="!loaded || saving" aria-label="主体完整入画后再放大" @update:model-value="set('wait_full_body', Boolean($event))" /></div>
+          <p class="setting-hint">先以 1× 录制，船体左右边缘留有余量且尺寸连续稳定后才放大。长船无法完整入画时继续全景录制。放大后至少观察 {{ modelValue.zoom_min_hold_seconds }} 秒，连续 {{ modelValue.departure_confirm_seconds }} 秒且至少 {{ modelValue.departure_min_observations }} 次新观测未见目标后才确认离场；目标关联不明最多等待 {{ modelValue.target_acquire_timeout_seconds }} 秒。</p>
+          <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
+            <el-form-item label="放大后最短观察 (秒)"><el-input-number :model-value="modelValue.zoom_min_hold_seconds" :min="0" :max="120" controls-position="right" @update:model-value="set('zoom_min_hold_seconds', Number($event))" /></el-form-item>
+            <el-form-item label="放大后目标等待 (秒)"><el-input-number :model-value="modelValue.target_acquire_timeout_seconds" :min="3" :max="180" controls-position="right" @update:model-value="set('target_acquire_timeout_seconds', Number($event))" /></el-form-item>
+          </el-form>
+          <el-collapse class="recording-advanced"><el-collapse-item name="horizontal-policy" title="左右跟随与完整入画参数">
+            <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
+              <el-form-item label="中心不动作区 (左右各 %)"><el-input-number :model-value="modelValue.pan_dead_zone * 100" :min="5" :max="35" controls-position="right" @update:model-value="set('pan_dead_zone', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="每次最多水平修正 (画面宽 %)"><el-input-number :model-value="modelValue.pan_step_limit * 50" :min="2.5" :max="30" :step="2.5" controls-position="right" @update:model-value="set('pan_step_limit', Number($event) / 50)" /></el-form-item>
+              <el-form-item label="水平动作间隔 (秒)"><el-input-number :model-value="modelValue.pan_cooldown_seconds" :min=".5" :max="15" :step=".5" controls-position="right" @update:model-value="set('pan_cooldown_seconds', Number($event))" /></el-form-item>
+              <el-form-item label="最大偏离原位 (云台全行程 %)"><el-input-number :model-value="modelValue.pan_max_travel_ratio * 100" :min="1" :max="40" controls-position="right" @update:model-value="set('pan_max_travel_ratio', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="船体入画边缘余量 (%)"><el-input-number :model-value="modelValue.body_entry_margin * 100" :min="1" :max="20" controls-position="right" @update:model-value="set('body_entry_margin', Number($event) / 100)" /></el-form-item>
+              <el-form-item label="完整入画稳定时长 (秒)"><el-input-number :model-value="modelValue.body_entry_confirm_seconds" :min=".2" :max="10" :step=".2" controls-position="right" @update:model-value="set('body_entry_confirm_seconds', Number($event))" /></el-form-item>
+              <el-form-item label="离场最少新观测次数"><el-input-number :model-value="modelValue.departure_min_observations" :min="2" :max="30" controls-position="right" @update:model-value="set('departure_min_observations', Number($event))" /></el-form-item>
+            </el-form>
+            <p class="setting-hint">上下取景受限且船体被真实裁切时仍可安全降低倍率；不会通过自动上下移动补偿。实时画面中的等待、旋转和归位均有状态提示。</p>
+          </el-collapse-item></el-collapse>
+        </section>
         <ol class="optical-cycle-stages" aria-label="光学循环录制顺序"><li v-for="(stage, index) in stages" :key="stage" :class="{ active: modelValue.enabled && status?.state !== 'disabled' && status?.state !== 'error' && index === activeStep, passed: modelValue.enabled && status?.state !== 'disabled' && index < activeStep }"><span><Check v-if="modelValue.enabled && index < activeStep" :size="11" /><template v-else>{{ index + 1 }}</template></span><strong>{{ stage }}</strong></li></ol>
         <el-radio-group :model-value="modelValue.adaptive_zoom_enabled" :disabled="!loaded || saving" class="focus-mode-options adaptive-mode-options" aria-label="光学倍率策略" @update:model-value="set('adaptive_zoom_enabled', Boolean($event))"><el-radio-button :value="true">按船高自适应</el-radio-button><el-radio-button :value="false">固定倍率</el-radio-button></el-radio-group>
         <template v-if="modelValue.adaptive_zoom_enabled">
@@ -124,7 +148,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <p v-if="currentTarget && selection?.target_selection_reason" class="setting-hint">{{ selectionReasonLabel(selection.target_selection_reason) }}</p>
           <p v-if="currentTarget && selection?.selection_reason" class="setting-hint">{{ selectionReasonLabel(selection.selection_reason) }}</p>
         </section>
-        <p class="setting-hint">每轮只锁定一艘目标船，不让背景停泊船延长本轮。目标离开放大视野后缩回 1×，再重新选择可录制的移动目标。</p>
+        <p class="setting-hint">每轮锁定同一艘目标船，检测到目标时持续录制；短暂漏检和身份重关联先等待，确认离场后才缩回 1× 并恢复原水平机位。</p>
         <p v-if="sourceMode === 'local'" class="optical-local-note">光学循环需现场摄像头。本地视频只验证检测与数字录制，不会驱动摄像头镜头。</p>
         <div v-if="status?.zoom_driver === 'optical'" class="optical-live-facts"><span>镜头倍率 <strong>{{ status.current_zoom_factor == null ? '运动中 / 待确认' : `${status.current_zoom_factor}×` }}</strong></span><span>已完成 <strong>{{ status.cycle_count || 0 }}</strong> 轮</span></div>
       </template>
@@ -149,13 +173,13 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
             <el-form-item label="选船切换余量 (%)"><el-input-number :model-value="Math.round(modelValue.target_switch_margin * 100)" :min="0" :max="100" :step="5" controls-position="right" @update:model-value="set('target_switch_margin', Number($event) / 100)" /></el-form-item>
             <el-form-item label="变倍冷却时长 (秒)"><el-input-number :model-value="modelValue.zoom_adjust_cooldown_seconds" :min="1" :max="30" controls-position="right" @update:model-value="set('zoom_adjust_cooldown_seconds', Number($event))" /></el-form-item>
             <el-form-item label="变倍滞回幅度 (%)"><el-input-number :model-value="Math.round(modelValue.zoom_adjust_hysteresis * 100)" :min="5" :max="50" :step="5" controls-position="right" @update:model-value="set('zoom_adjust_hysteresis', Number($event) / 100)" /></el-form-item>
-            <el-form-item label="放大后目标重识别超时 (秒)"><el-input-number :model-value="modelValue.target_acquire_timeout_seconds" :min="3" :max="120" controls-position="right" @update:model-value="set('target_acquire_timeout_seconds', Number($event))" /></el-form-item>
+            <el-form-item label="目标关联不明等待 (秒)"><el-input-number :model-value="modelValue.target_acquire_timeout_seconds" :min="3" :max="180" controls-position="right" @update:model-value="set('target_acquire_timeout_seconds', Number($event))" /></el-form-item>
           </el-form>
           <p class="setting-hint">启动时先观察运动，避免停泊船抢占。静止计时只累计有效观测，镜头移动和漏检间隔不算停泊证据。倍率调整需满足冷却与滞回；放大后无法关联锁定目标时，超时缩回 1× 重新选船，背景船不延长本轮。</p>
         </el-collapse-item>
         <el-collapse-item name="timing"><template #title><Settings2 :size="14" />{{ optical ? '循环判断与存储策略' : '触发、时长与存储策略' }}</template>
           <el-form label-position="top" class="recording-settings-grid">
-            <template v-if="optical"><el-form-item label="船尾消失确认 (秒)"><el-input-number :model-value="modelValue.departure_confirm_seconds" :min=".3" :max="10" :step=".1" :precision="1" controls-position="right" @update:model-value="set('departure_confirm_seconds', Number($event))" /></el-form-item><el-form-item label="镜头到位超时 (秒)"><el-input-number :model-value="modelValue.zoom_settle_timeout_seconds" :min="3" :max="60" controls-position="right" @update:model-value="set('zoom_settle_timeout_seconds', Number($event))" /></el-form-item><el-form-item label="回 1× 后稳定等待 (秒)"><el-input-number :model-value="modelValue.overview_settle_seconds" :min="0" :max="5" :step=".1" :precision="1" controls-position="right" @update:model-value="set('overview_settle_seconds', Number($event))" /></el-form-item></template>
+            <template v-if="optical"><el-form-item label="船尾消失确认 (秒)"><el-input-number :model-value="modelValue.departure_confirm_seconds" :min=".3" :max="30" :step=".1" :precision="1" controls-position="right" @update:model-value="set('departure_confirm_seconds', Number($event))" /></el-form-item><el-form-item label="镜头到位超时 (秒)"><el-input-number :model-value="modelValue.zoom_settle_timeout_seconds" :min="3" :max="60" controls-position="right" @update:model-value="set('zoom_settle_timeout_seconds', Number($event))" /></el-form-item><el-form-item label="回 1× 后稳定等待 (秒)"><el-input-number :model-value="modelValue.overview_settle_seconds" :min="0" :max="5" :step=".1" :precision="1" controls-position="right" @update:model-value="set('overview_settle_seconds', Number($event))" /></el-form-item></template>
             <template v-else><el-form-item label="入场前预录 (秒)"><el-input-number :model-value="modelValue.pre_roll_seconds" :min="0" :max="20" controls-position="right" @update:model-value="set('pre_roll_seconds', Number($event))" /></el-form-item><el-form-item label="离场后延录 (秒)"><el-input-number :model-value="modelValue.post_roll_seconds" :min="1" :max="60" controls-position="right" @update:model-value="set('post_roll_seconds', Number($event))" /></el-form-item></template>
             <el-form-item label="连续检测触发次数"><el-input-number :model-value="modelValue.min_hits" :min="1" :max="20" controls-position="right" @update:model-value="set('min_hits', Number($event))" /></el-form-item>
             <el-form-item label="船舶置信度阈值"><el-input-number :model-value="modelValue.confidence_threshold" :min=".1" :max="1" :step=".05" :precision="2" controls-position="right" @update:model-value="set('confidence_threshold', Number($event))" /></el-form-item>

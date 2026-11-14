@@ -58,7 +58,7 @@ class VesselTargetSelector:
                        "zoom_factor": 1., "requested_zoom_factor": 1., "selection_reason": "no_moving_target"}
 
     @staticmethod
-    def detection_box(vessel, width, height, zoom_factor=1.):
+    def detection_box(vessel, width, height, zoom_factor=1., view_offset=0.):
         try:
             confidence = float(vessel.get("confidence", 0))
             if not math.isfinite(confidence):
@@ -73,7 +73,8 @@ class VesselTargetSelector:
                 x2, y2 = min(1., (x + w) / width), min(1., (y + h) / height)
                 if x2 <= x1 or y2 <= y1:
                     continue
-                return tuple(.5 + (n - .5) / zoom_factor for n in (x1, y1, x2, y2))
+                return tuple(.5 + (n - .5) / zoom_factor + (view_offset if axis % 2 == 0 else 0.)
+                             for axis, n in enumerate((x1, y1, x2, y2)))
         except (TypeError, ValueError, KeyError, ZeroDivisionError):
             pass
         return None
@@ -140,7 +141,7 @@ class VesselTargetSelector:
     def appearance_similarity(left, right):
         return float(np.dot(left, right)) if left is not None and right is not None else None
 
-    def update(self, vessels, width, height, timestamp, settings, zoom_factor=1., calibrated_factors=None, camera_motion=None, image=None):
+    def update(self, vessels, width, height, timestamp, settings, zoom_factor=1., calibrated_factors=None, camera_motion=None, image=None, view_offset=0.):
         if width <= 0 or height <= 0 or not math.isfinite(timestamp) or not math.isfinite(zoom_factor) or zoom_factor < 1:
             return dict(self.result)
         if self.last_timestamp is not None and timestamp < self.last_timestamp:
@@ -163,7 +164,7 @@ class VesselTargetSelector:
         self.tracks = {key: track for key, track in self.tracks.items() if timestamp - track.last_seen <= max_age}
         parsed = []
         for vessel in vessels:
-            box = self.detection_box(vessel, width, height, zoom_factor)
+            box = self.detection_box(vessel, width, height, zoom_factor, view_offset)
             confidence = float(vessel.get("confidence", 0)) if box else 0.
             if box and confidence >= settings.confidence_threshold:
                 parsed.append((vessel, box, self.appearance_for(image, vessel)))

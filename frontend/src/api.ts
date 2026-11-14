@@ -111,6 +111,16 @@ export interface ModelSettings {
 }
 
 export interface RecordingSettings {
+  auto_horizontal_follow: boolean
+  pan_dead_zone: number
+  pan_step_limit: number
+  pan_cooldown_seconds: number
+  pan_max_travel_ratio: number
+  wait_full_body: boolean
+  body_entry_margin: number
+  body_entry_confirm_seconds: number
+  zoom_min_hold_seconds: number
+  departure_min_observations: number
   enable_ship_name: boolean
   enable_draft: boolean
   auto_region_focus: boolean
@@ -156,6 +166,8 @@ export interface RecordingSettings {
   target_acquire_timeout_seconds: number
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
+  auto_horizontal_follow: false, pan_dead_zone: .15, pan_step_limit: .3, pan_cooldown_seconds: 2, pan_max_travel_ratio: .15,
+  wait_full_body: true, body_entry_margin: .03, body_entry_confirm_seconds: 1, zoom_min_hold_seconds: 12, departure_min_observations: 3,
   enable_ship_name: true, enable_draft: true, auto_region_focus: false,
   target_filter_enabled: true, min_target_height_ratio: .06, min_target_width_ratio: .12,
   target_confirm_hits: 3, target_confirm_seconds: .4,
@@ -164,11 +176,11 @@ export const defaultRecordingSettings = (): RecordingSettings => ({
   recording_mode: 'optical_cycle', enabled: false, pre_roll_seconds: 3, post_roll_seconds: 5, min_hits: 1,
   confidence_threshold: .45, max_clip_seconds: 300, max_storage_gb: 10,
   retention_days: 30, focus_mode: 'auto', zoom_factor: 4, center_x: .5, center_y: .5, padding: .2,
-  departure_confirm_seconds: 1, zoom_settle_timeout_seconds: 15, overview_settle_seconds: .5,
+  departure_confirm_seconds: 5, zoom_settle_timeout_seconds: 15, overview_settle_seconds: .5,
   adaptive_zoom_enabled: true, target_height_ratio: 1, min_optical_zoom: 3, max_optical_zoom: 8,
   suppress_stationary: true, stationary_seconds: 15, stationary_motion_threshold: .015,
   motion_confirm_seconds: 1, target_switch_margin: .2,
-  zoom_adjust_cooldown_seconds: 3, zoom_adjust_hysteresis: .15, target_acquire_timeout_seconds: 15,
+  zoom_adjust_cooldown_seconds: 3, zoom_adjust_hysteresis: .15, target_acquire_timeout_seconds: 45,
 })
 export interface TargetProcessing {
   eligible: boolean
@@ -222,11 +234,14 @@ const additionalSelectionReasons: Record<string, string> = {
   filter_disabled: '目标筛选已关闭',
   vertical_clipped: '船体竖直方向被裁切，继续观察',
   stale_observation: '观测已过期，等待新画面',
+  horizontal_view_limited: '受水平取景限制，降低倍率以保留船体中心',
 }
 export const selectionReasonLabel = (reason?: string) => additionalSelectionReasons[reason || ''] || baseSelectionReasonLabel(reason)
-export type OpticalCyclePhase = 'overview' | 'initializing' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'recovering' | 'error'
-export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', recovering: '镜头通信中断 · 正在恢复 1×', error: '光学循环异常' }[phase || 'overview'])
+export type OpticalCyclePhase = 'overview' | 'initializing' | 'waiting_body' | 'panning' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'recovering' | 'error'
+export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', waiting_body: '全景录制 · 等待船体完整入画', panning: '自动左右跟随 · 保持俯仰', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', recovering: '镜头通信中断 · 正在恢复 1×', error: '光学循环异常' }[phase || 'overview'])
 export interface RecordingStatus {
+  waiting_full_body?: boolean
+  horizontal_follow?: { enabled: boolean; moving: boolean; offset: number; limited: boolean; return_pending: boolean }
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null
   media_recording?: boolean
@@ -298,6 +313,7 @@ export interface CameraStatus {
   retry_delay_seconds?: number | null
 }
 export interface PtzStatus {
+  horizontal_follow_supported?: boolean
   pan_tilt_supported?: boolean; absolute_pan_tilt_supported?: boolean; region_focus_supported?: boolean; region_focus_error?: string
   configured: boolean; supported: boolean; focus_supported?: boolean; autofocus_supported?: boolean; focus_error?: string | null; error: string | null
   absolute_zoom_supported?: boolean; calibrated?: boolean; magnifications?: number[]

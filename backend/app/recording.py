@@ -35,7 +35,17 @@ class RecordingSettings(BaseModel):
 
     enabled: bool = False
     recording_mode: Literal["optical_cycle", "passage"] = "optical_cycle"
-    departure_confirm_seconds: float = Field(default=1, ge=.3, le=10)
+    departure_confirm_seconds: float = Field(default=5, ge=.3, le=30)
+    departure_min_observations: int = Field(default=3, ge=2, le=30)
+    wait_full_body: bool = True
+    body_entry_margin: float = Field(default=.03, ge=.01, le=.2)
+    body_entry_confirm_seconds: float = Field(default=1, ge=.2, le=10)
+    zoom_min_hold_seconds: float = Field(default=12, ge=0, le=120)
+    auto_horizontal_follow: bool = False
+    pan_dead_zone: float = Field(default=.15, ge=.05, le=.35)
+    pan_step_limit: float = Field(default=.3, ge=.05, le=.6)
+    pan_cooldown_seconds: float = Field(default=2, ge=.5, le=15)
+    pan_max_travel_ratio: float = Field(default=.15, ge=.01, le=.4)
     zoom_settle_timeout_seconds: float = Field(default=15, ge=3, le=60)
     overview_settle_seconds: float = Field(default=.5, ge=0, le=5)
     adaptive_zoom_enabled: bool = True
@@ -49,7 +59,7 @@ class RecordingSettings(BaseModel):
     target_switch_margin: float = Field(default=.2, ge=0, le=1)
     zoom_adjust_cooldown_seconds: float = Field(default=3, ge=1, le=30)
     zoom_adjust_hysteresis: float = Field(default=.15, ge=.05, le=.5)
-    target_acquire_timeout_seconds: float = Field(default=15, ge=3, le=120)
+    target_acquire_timeout_seconds: float = Field(default=45, ge=3, le=180)
     pre_roll_seconds: float = Field(default=3, ge=0, le=20)
     post_roll_seconds: float = Field(default=5, ge=1, le=60)
     min_hits: int = Field(default=1, ge=1, le=20)
@@ -234,7 +244,8 @@ class RecordingManager(OpticalCycleMixin):
                 self.hits = 0
                 self.last_seen = None
                 self.first_seen = None
-            if self._optical_session and settings.recording_mode != self.settings.recording_mode:
+            if self._optical_session and (settings.recording_mode != self.settings.recording_mode
+                    or settings.auto_horizontal_follow != self.settings.auto_horizontal_follow):
                 self._halt_optical("settings_changed")
             self.settings = settings
             if self.phase == "error" and self._control_future is None and self.active is None:
@@ -420,7 +431,7 @@ class RecordingManager(OpticalCycleMixin):
         record_event("recording_encoding", recording_id=item["id"], camera_id=self.camera_id,
             session_id=self.session_id, recording_mode=item["recording_mode"], reason=reason)
         _atomic_json(self.root / item["id"] / "manifest.json", item)
-        interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed", "target_not_reacquired", "target_ambiguous", "target_evidence_timeout"}
+        interrupted = reason in {"source_error", "source_discontinuity", "storage_limit", "process_restarted", "zoom_failed", "zoom_timeout", "cycle_timeout", "resolution_changed", "target_not_reacquired", "target_ambiguous", "target_evidence_timeout", "pan_failed"}
         if item.get("recording_mode") == "optical_cycle" and not item.get("returned_to_overview"):
             interrupted = True
         if item.get("zoom_fallback"):
@@ -539,6 +550,9 @@ class RecordingManager(OpticalCycleMixin):
                     "buffer_seconds": round(self.buffer[-1][0] - self.buffer[0][0], 2) if len(self.buffer) > 1 else 0,
                     "error": self.error, "source_name": self.source_name, "storage_bytes": self._storage_bytes(), "zoom_capability": "optical" if self._optical_session else "digital", "focus": self.focus,
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
+                    "horizontal_follow": {"enabled": self.settings.auto_horizontal_follow, "moving": self.phase == "panning",
+                        "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced},
+                    "waiting_full_body": self.phase == "waiting_body",
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
                     "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
                     "identity_fallback": bool(self.active and self._identity_fallback_active),

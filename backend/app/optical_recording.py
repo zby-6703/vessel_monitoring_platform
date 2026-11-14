@@ -17,9 +17,10 @@ from .vessel_selection import VesselTargetSelector
 from .scene_motion import BackgroundMotionEstimator
 from .monitoring_audit import record_event
 from .detail_focus import detail_focus
+from .optical_following import OpticalFollowingMixin
 
 
-class OpticalCycleMixin:
+class OpticalCycleMixin(OpticalFollowingMixin):
     TARGET_EVIDENCE_GRACE_SECONDS = 5.
 
     def _initialize_optical_cycle(self):
@@ -66,6 +67,7 @@ class OpticalCycleMixin:
         self._media_target_box = None
         self._closed_cycle_id = None
         self._closed_cycle_pending = False
+        self._initialize_following()
 
     @staticmethod
     def _source_target_box(vessel, width, height):
@@ -199,8 +201,8 @@ class OpticalCycleMixin:
     def zoom_observation_context(self) -> dict:
         with self.lock:
             return {"generation": self._cycle_generation, "phase": self.phase,
-                    "accept_detections": self.phase in {"overview", "zoomed"} and not self._cycle_halt,
-                    "zoom_factor": self.current_zoom_factor}
+                    "accept_detections": self.phase in {"overview", "waiting_body", "zoomed"} and not self._cycle_halt,
+                    "zoom_factor": self.current_zoom_factor, "pan_offset": self._pan_offset}
 
     def observe_zoom_factor(self, factor, generation=None):
         """Accept a read-only lens measurement only for the same idle view."""
@@ -235,6 +237,11 @@ class OpticalCycleMixin:
         return getter() if getter else [1., self.settings.zoom_factor]
 
     def _validate_zoom_policy(self, settings):
+        if settings.auto_horizontal_follow:
+            validator = getattr(self.zoom_controller, "validate_horizontal_follow", None)
+            if validator is None:
+                raise ValueError("摄像头控制器不支持自动水平跟随")
+            validator()
         if settings.adaptive_zoom_enabled:
             factors = [factor for factor in self.available_magnifications() if settings.min_optical_zoom <= factor <= settings.max_optical_zoom]
             if not factors:
@@ -247,7 +254,7 @@ class OpticalCycleMixin:
         with self.lock:
             self._validate_zoom_policy(self.settings)
 
-    def _phase(self, phase):
+    def _phase(self, phase, *, reset_acquisition=True):
         self.phase = phase
         self._cycle_generation += 1
         record_event("optical_phase", phase=phase, generation=self._cycle_generation,
@@ -255,10 +262,13 @@ class OpticalCycleMixin:
         self.hits = 0
         if phase == "rearming":
             self._overview_since = None
-        if phase == "zoomed":
+        if phase == "zoomed" and reset_acquisition:
             self._empty_since = None
             self._zoomed_since = None
             self._zoomed_ship_seen = False
+            self._zoom_hold_since = None
+            self._zoom_settled_pending = True
+        self._empty_hits = 0
 
     def _zoom_event(self, target, settled):
         recording_id = self.active["id"] if self.active else self._closed_cycle_id
@@ -271,10 +281,15 @@ class OpticalCycleMixin:
             self._zoom_retry_count = 0
         self._phase(phase)
         self._control_target = target
+        self._control_kind = "zoom"
         self._control_started = time.monotonic()
         self._zoom_event(target, False)
         self.current_zoom_factor = None
-        future = self.control_executor.submit(self.zoom_controller.move_to, target)
+        if phase == "initializing" and not self._pan_displaced:
+            self._follow_owned = False
+        follow = bool((self._cycle_policy or self.settings).auto_horizontal_follow or self._follow_owned)
+        self._follow_owned = follow
+        future = self.control_executor.submit(self._move_cycle_zoom, target, phase, follow)
         self._control_future = future
         # A completed future invokes this callback immediately. Assign it first.
         session_id = self.session_id
@@ -374,6 +389,10 @@ class OpticalCycleMixin:
                     self._phase("error")
                 return
             self.current_zoom_factor = target
+            if result.get("pan_restored"):
+                self._pan_offset = 0.
+                self._pan_displaced = False
+                self._pan_limited = False
             self._zoom_event(target, True)
             if command_phase != "recovering" and not self._zoom_fallback_active:
                 # A successful ordinary retry is no longer a network failure;
@@ -416,6 +435,9 @@ class OpticalCycleMixin:
         # Invalidate callbacks from a timed-out operation. The serial motor
         # worker finishes it before processing the queued return command.
         self._control_future = None
+        if self._control_kind == "pan":
+            self._fail_horizontal_follow(TimeoutError("水平跟随未在限定时间内到位"))
+            return
         self.current_zoom_factor = None
         if self._zoom_failure_kind == "transport" and not self._cycle_halt:
             # A late/unknown reply is never a position acknowledgement. Keep
@@ -463,6 +485,7 @@ class OpticalCycleMixin:
         self._zoom_recovery_due = None
         self._zoom_failure_kind = None
         self._zoom_fallback_active = False
+        self._initialize_following()
         self._cycle_generation += 1
         self._phase("overview")
 
@@ -479,7 +502,7 @@ class OpticalCycleMixin:
             self._seal_optical_media(cutoff, reason)
         self._clear_buffer()
         self.hits = 0
-        if self._control_future is not None and self._control_target != 1:
+        if self._control_future is not None and (self._control_kind == "pan" or self._control_target != 1):
             cancel = getattr(self.zoom_controller, "cancel_move", None)
             if cancel:
                 cancel()
@@ -488,7 +511,7 @@ class OpticalCycleMixin:
             self._phase("error" if self.error else "overview")
             self._optical_session = False
         elif self._control_future is None:
-            if self.current_zoom_factor == 1:
+            if self.current_zoom_factor == 1 and not self._pan_displaced:
                 self._finish(reason)
                 self._phase("error" if self.error else "overview")
                 self._optical_session = False
@@ -556,8 +579,9 @@ class OpticalCycleMixin:
             return False
         zoom = float(self.current_zoom_factor or 1.)
         low, high = .5 - .5 / zoom, .5 + .5 / zoom
+        left, right = low + self._pan_offset, high + self._pan_offset
         old = self.locked_target["box"]
-        expected = (max(low, old[0]), max(low, old[1]), min(high, old[2]), min(high, old[3]))
+        expected = (max(left, old[0]), max(low, old[1]), min(right, old[2]), min(high, old[3]))
         box = target["box"]
         ew, eh = expected[2] - expected[0], expected[3] - expected[1]
         bw, bh = box[2] - box[0], box[3] - box[1]
@@ -650,7 +674,7 @@ class OpticalCycleMixin:
                 self._halt_optical("cycle_timeout")
                 return
             if not self.active.get("media_stopped"):
-                if detail_focus.busy():
+                if detail_focus.busy() or self.phase == "panning":
                     # Focus search produces deliberately blurry frames. Keep
                     # source footage, but never treat those misses as departure.
                     self._flush_optical_media(timestamp)
@@ -660,7 +684,11 @@ class OpticalCycleMixin:
                 # Before first acquisition (and during lens motion) absence of
                 # an identity is NOT proof of departure. Stream actual frames
                 # straight to disk rather than dropping a bounded JPEG cache.
-                if not self._zoomed_ship_seen and self._zoom_failure_kind != "transport":
+                if (not self._zoomed_ship_seen and self._zoom_failure_kind != "transport"
+                        or self._hold_zoom(timestamp, policy)):
+                    # A longer observation window must retain actual source
+                    # frames instead of overflowing the bounded tail cache.
+                    self._flush_optical_media(timestamp)
                     self._write_frame(image, timestamp)
                 else:
                     self._queue_optical_media(image, timestamp)
@@ -694,7 +722,7 @@ class OpticalCycleMixin:
             # Require a subsequent inference captured after the panorama has
             # settled AND the previous recording was closed.
             return
-        if self._cycle_halt or self.error or self.phase not in {"overview", "zoomed"}:
+        if self._cycle_halt or self.error or self.phase not in {"overview", "waiting_body", "zoomed"}:
             return
         if self.phase == "overview" and self.active is None:
             self._buffer_frame(timestamp, image)
@@ -706,7 +734,8 @@ class OpticalCycleMixin:
         actual_zoom = float(self.current_zoom_factor or 1.)
         background = self.background_motion.update(image, qualified, timestamp, generation=self._cycle_generation)
         self.adaptive_selection = self.target_selector.update(qualified, image.shape[1], image.shape[0], timestamp, policy,
-            zoom_factor=actual_zoom, calibrated_factors=self.available_magnifications(), camera_motion=background, image=image)
+            zoom_factor=actual_zoom, calibrated_factors=self.available_magnifications(), camera_motion=background,
+            image=image, view_offset=self._pan_offset)
         if self.phase == "overview":
             candidate = self.adaptive_selection["selected"]
             candidate_id = candidate["target_id"] if candidate else None
@@ -731,6 +760,10 @@ class OpticalCycleMixin:
             self._media_target_box = self._source_target_box(candidate, image.shape[1], image.shape[0])
             self._closed_cycle_id = None
             self._closed_cycle_pending = False
+            self._pan_limited = False
+            self._last_pan_adjust = None
+            self._body_since = self._body_last_seen = self._body_width = None
+            self._body_hits = 0
             item = self.catalog[self.active["id"]]
             item.update(recording_mode="optical_cycle", cycle_index=self.cycle_count + 1,
                         optical_zoom_factor=self._active_zoom_factor, initial_optical_zoom_factor=self._active_zoom_factor,
@@ -746,10 +779,22 @@ class OpticalCycleMixin:
             self._clear_buffer()
             self._write_frame(image, timestamp)
             # Open the file and write the triggering full-view frame FIRST.
-            self._command_zoom(self._active_zoom_factor, "zooming_in")
+            if policy.wait_full_body:
+                self._active_zoom_factor = 1.
+                item.update(optical_zoom_factor=1., initial_optical_zoom_factor=1., waiting_full_body=True)
+                self._phase("waiting_body")
+                self._zoomed_ship_seen = True  # actual positive panorama frame
+                self._zoomed_since = timestamp
+            else:
+                self._command_zoom(self._active_zoom_factor, "zooming_in")
         else:
             if self._zoomed_since is None:
                 self._zoomed_since = timestamp
+            if self._zoom_settled_pending:
+                # Cooldown begins with a NEW settled-view frame, rather than
+                # expiring while a slow physical zoom command is still moving.
+                self._last_zoom_adjust = timestamp
+                self._zoom_settled_pending = False
             target = self._find_locked_target(timestamp)
             if target:
                 self.locked_target = {**self.locked_target, **target}
@@ -758,20 +803,44 @@ class OpticalCycleMixin:
                 self._record_optical_attributes([observed_vessel])
                 self._zoomed_ship_seen = True
                 self._empty_since = None
+                self._empty_hits = 0
                 self._association_lost_since = None
+                if self.phase == "zoomed" and self._zoom_hold_since is None:
+                    self._zoom_hold_since = timestamp
                 self.catalog[self.active["id"]]["target_reacquired"] = True
                 if self._cycle_exit_reason == "target_ambiguous":
                     self._cycle_exit_reason = "vessel_left"
-                if policy.suppress_stationary and target["motion_state"] == "stationary":
-                    self._cycle_exit_reason = "target_stationary"
-                    self._seal_optical_media(timestamp, "target_stationary")
-                    self._command_zoom(1., "zooming_out")
+                if self.phase == "waiting_body":
+                    ready = self._body_ready(observed_vessel, image, timestamp, policy)
+                    desired = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
+                    if self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy,
+                            planned_zoom=desired["zoom_factor"] if ready else None):
+                        return
+                    if not ready:
+                        return
+                    plan = self._centered_zoom_plan(target, observed_vessel, image, policy)
+                    self._active_zoom_factor = plan["zoom_factor"]
+                    item = self.catalog[self.active["id"]]
+                    item.update(optical_zoom_factor=self._active_zoom_factor,
+                                initial_optical_zoom_factor=self._active_zoom_factor,
+                                waiting_full_body=False, body_entered_seconds=timestamp,
+                                selection_reason=plan["selection_reason"])
+                    self._command_zoom(self._active_zoom_factor, "zooming_in")
                     return
-                if not self._zoom_fallback_active and not self._identity_fallback_active and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds:
+                if self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy):
+                    return
+                if (not self._zoom_fallback_active and not self._identity_fallback_active
+                        and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds):
                     plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
                     next_zoom, current = plan["zoom_factor"], actual_zoom
                     should_reduce = next_zoom < current and (policy.adaptive_zoom_enabled and target["height_ratio"] * current > policy.target_height_ratio * (1 + policy.zoom_adjust_hysteresis) or plan["max_safe_zoom"] < current * .98)
                     should_increase = policy.adaptive_zoom_enabled and next_zoom > current and (current < policy.min_optical_zoom or plan["requested_zoom_factor"] >= next_zoom * (1 + policy.zoom_adjust_hysteresis))
+                    if self._hold_zoom(timestamp, policy):
+                        # Keep an enlarged view long enough to actually observe
+                        # the ship. A real vertical crop still permits reducing
+                        # the lens to preserve the hull (never tilting it).
+                        should_increase = False
+                        should_reduce = should_reduce and bool(target.get("height_clipped"))
                     if should_reduce or should_increase:
                         self._last_zoom_adjust = timestamp
                         self._active_zoom_factor = next_zoom
@@ -785,6 +854,7 @@ class OpticalCycleMixin:
                 # outside the narrower zoomed FOV. Wait for it to arrive before
                 # an empty zoomed frame can mean that the stern has departed.
                 self._empty_since = None
+                self._empty_hits = 0
                 self._flush_optical_media(timestamp)
                 if self._association_lost_since is None:
                     self._association_lost_since = self._zoomed_since if not self._zoomed_ship_seen else timestamp
@@ -803,9 +873,24 @@ class OpticalCycleMixin:
                     self._cycle_exit_reason = "target_ambiguous" if self._zoomed_ship_seen else "target_not_reacquired"
                     self._seal_optical_media(timestamp, self._cycle_exit_reason)
                     self._command_zoom(1., "zooming_out")
-            elif self._empty_since is None:
+            else:
+                # A still-visible hull with the same positive tracking/image
+                # evidence is not a departure just because selector IDs churn.
+                positive = self._positive_unconfirmed_target(image, vessels, observation_context)
+                if positive:
+                    self._observe_media_target(positive, image, timestamp)
+                    self._empty_since = None
+                    self._empty_hits = 0
+                    return
+                if self._hold_zoom(timestamp, policy):
+                    self._empty_since = None
+                    self._empty_hits = 0
+                    return
                 self._association_lost_since = None
-                self._empty_since = timestamp
-            elif timestamp - self._empty_since >= policy.departure_confirm_seconds:
-                self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds, "vessel_left")
-                self._command_zoom(1., "zooming_out")
+                self._empty_hits += 1
+                if self._empty_since is None:
+                    self._empty_since = timestamp
+                elif (timestamp - self._empty_since >= policy.departure_confirm_seconds
+                        and self._empty_hits >= policy.departure_min_observations):
+                    self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds, "vessel_left")
+                    self._command_zoom(1., "zooming_out")

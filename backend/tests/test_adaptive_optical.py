@@ -118,7 +118,8 @@ def harness_factory(tmp_path, monkeypatch):
             with manager.lock:
                 manager.catalog[recording_id]["status"] = status
         monkeypatch.setattr(manager, "_encode", finalize)
-        config = {"enabled": True, "recording_mode": "optical_cycle", "zoom_factor": 3,
+        config = {"wait_full_body": False, "zoom_min_hold_seconds": 0, "departure_min_observations": 2,
+                  "enabled": True, "recording_mode": "optical_cycle", "zoom_factor": 3,
                   "adaptive_zoom_enabled": True, "target_height_ratio": .6,
                   "min_optical_zoom": 1.1, "max_optical_zoom": 8,
                   "suppress_stationary": False, "min_hits": 1, "pre_roll_seconds": 0,
@@ -360,6 +361,7 @@ def test_safe_view_restores_detail_floor_even_when_height_suggestion_is_lower(ha
     harness.warm()
     recording_id = harness.start([ship(y=.36)])
     assert harness.manager.current_zoom_factor == 1  # vertical margin cannot fit 4x yet
+    harness.feed([ship(y=.39)])  # new settled-view frame starts cooldown
     harness.feed([ship(y=.39)], advance=1.2)
     harness.settle("zoomed")
     assert harness.manager.current_zoom_factor == 4

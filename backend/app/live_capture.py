@@ -37,6 +37,7 @@ from .schemas import TaskKind
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
 from .camera_motion import CameraMotionMixin
+from .horizontal_follow import HorizontalFollowMixin
 from .detail_focus import detail_focus
 from .inference.scheduler import inference_scheduler
 
@@ -370,7 +371,7 @@ class CameraCapture:
         while not stopped.is_set() and not self.stop_event.is_set():
             context = recording_manager.zoom_observation_context()
             busy = recording_manager.optical_control_busy()
-            if (configured and busy and context.get("phase") in {"overview", "zoomed"}
+            if (configured and busy and context.get("phase") in {"overview", "waiting_body", "zoomed"}
                     and context.get("accept_detections") is True):
                 # The optical session owns the position, even while waiting
                 # for a ship. Keep its authenticated TCP connection warm but
@@ -504,7 +505,7 @@ class CameraCapture:
                         self._inference_error = safe_camera_error(exc, settings)
 
 
-class OnvifControl(CameraMotionMixin):
+class OnvifControl(HorizontalFollowMixin, CameraMotionMixin):
     """Manual lens control and calibrated, absolute optical zoom movements."""
     PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
     IMAGING = "http://www.onvif.org/ver20/imaging/wsdl"
@@ -785,7 +786,7 @@ class OnvifControl(CameraMotionMixin):
                     "absolute_zoom_supported": False, "calibrated": False,
                     "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None,
                     "measured_zoom_factor": None}
-        response.update(pan_tilt_supported=False, absolute_pan_tilt_supported=False, region_focus_supported=False)
+        response.update(pan_tilt_supported=False, absolute_pan_tilt_supported=False, region_focus_supported=False, horizontal_follow_supported=False)
         if not configured:
             response.update(error="未配置 ONVIF PTZ 服务及媒体 Profile Token", zoom_error="光学循环录制尚未配置摄像头")
             return response
@@ -812,6 +813,7 @@ class OnvifControl(CameraMotionMixin):
             try:
                 motion = self.motion_options()
                 response.update(pan_tilt_supported="continuous" in motion, absolute_pan_tilt_supported="absolute" in motion)
+                response["horizontal_follow_supported"] = "fov" in motion and "absolute" in motion
             except Exception as exc:
                 response["pan_tilt_error"] = safe_camera_error(exc, settings)
             try:

@@ -30,6 +30,28 @@ class FakeZoom:
         self.fail_factor = None
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.pan_calls = []
+        self.pan_returns = 0
+        self.block_pan = False
+
+    def validate_horizontal_follow(self):
+        return {"fov": True, "absolute": True}
+
+    def begin_horizontal_follow(self):
+        return {"x": 0., "y": .2}
+
+    def follow_horizontal(self, step, **kwargs):
+        self.pan_calls.append(step)
+        self.events.append(("pan", step))
+        if self.block_pan:
+            self.entered.set()
+            assert self.release.wait(5)
+        return {"settled": True, "fov_x": step, "before": {"x": 0., "y": .2}, "after": {"x": step * .1, "y": .2}}
+
+    def restore_horizontal_follow(self):
+        self.pan_returns += 1
+        self.events.append(("pan_return", self.pan_returns))
+        return {"settled": True}
 
     def validate_cycle(self, factor):
         if factor not in {1, 3}:
@@ -67,8 +89,9 @@ class CycleHarness:
                 boxes = []
                 for box in vessel["boxes"]:
                     x, y, width, height = box["xywh"]
-                    x1, y1 = max(0, (x / 64 - .5) * zoom + .5), max(0, (y / 48 - .5) * zoom + .5)
-                    x2, y2 = min(1, ((x + width) / 64 - .5) * zoom + .5), min(1, ((y + height) / 48 - .5) * zoom + .5)
+                    offset = self.manager.zoom_observation_context().get("pan_offset", 0.)
+                    x1, y1 = max(0, (x / 64 - .5 - offset) * zoom + .5), max(0, (y / 48 - .5) * zoom + .5)
+                    x2, y2 = min(1, ((x + width) / 64 - .5 - offset) * zoom + .5), min(1, ((y + height) / 48 - .5) * zoom + .5)
                     if x2 > x1 and y2 > y1:
                         boxes.append({**box, "xywh": [x1 * 64, y1 * 48, (x2 - x1) * 64, (y2 - y1) * 48]})
                 if boxes:
@@ -172,6 +195,7 @@ def cycle_factory(tmp_path, monkeypatch):
                     manager.catalog[recording_id]["status"] = status
             monkeypatch.setattr(manager, "_encode", finalize)
         manager.update_settings({
+            "wait_full_body": False, "zoom_min_hold_seconds": 0, "departure_min_observations": 2,
             "recording_mode": "optical_cycle", "enabled": True,
             "adaptive_zoom_enabled": False, "suppress_stationary": False,
             "zoom_factor": 3, "min_hits": 1, "pre_roll_seconds": 0,
@@ -228,6 +252,7 @@ def test_focus_search_keeps_recording_and_cannot_create_false_departure(cycle_fa
     monkeypatch.setattr(optical_module.detail_focus, "busy", lambda: False)
     harness.depart()
     harness.phase("overview")
+    harness.manager.executor.submit(lambda: None).result(timeout=5)
     assert harness.manager.catalog[rid]["status"] == "completed"
 
 

@@ -195,6 +195,7 @@ def cycle_factory(tmp_path, monkeypatch):
                     manager.catalog[recording_id]["status"] = status
             monkeypatch.setattr(manager, "_encode", finalize)
         manager.update_settings({
+            "detail_capture_priority": False,
             "wait_full_body": False, "zoom_min_hold_seconds": 0, "departure_min_observations": 2,
             "recording_mode": "optical_cycle", "enabled": True,
             "adaptive_zoom_enabled": False, "suppress_stationary": False,

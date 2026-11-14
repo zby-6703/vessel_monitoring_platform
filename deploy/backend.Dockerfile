@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt "${ONNXRUNTIME_PACKAGE}"
 
 COPY backend ./backend
 COPY runtime_support ./runtime_support
+COPY config ./config
 
 WORKDIR /workspace/vessel_monitoring_platform/backend
 EXPOSE 8010

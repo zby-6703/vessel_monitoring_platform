@@ -32,6 +32,7 @@ def _path_env(name: str, default: str = "") -> Path | None:
 
 @dataclass(frozen=True)
 class Settings:
+    site_profile_path: Path | None = _path_env("SITE_PROFILE")
     app_env: str = os.getenv("APP_ENV", "development")
     app_host: str = os.getenv("APP_HOST", "0.0.0.0")
     app_port: int = int(os.getenv("APP_PORT", "8010"))
@@ -184,4 +185,13 @@ model_config_service = ModelConfigService()
 
 def get_effective_settings() -> Settings:
     from .camera_profiles import camera_profile_service
-    return camera_profile_service.effective(model_config_service.effective_settings())
+    settings = model_config_service.effective_settings()
+    if settings.site_profile_path:
+        from .site_profile import load_site_profile
+        optics = load_site_profile(settings.site_profile_path).camera_optics
+        settings = replace(settings,
+            camera_onvif_zoom_calibration=settings.camera_onvif_zoom_calibration or json.dumps(optics.zoom_calibration),
+            camera_onvif_zoom_space_uri=settings.camera_onvif_zoom_space_uri or optics.zoom_space_uri,
+            camera_onvif_zoom_timeout=settings.camera_onvif_zoom_timeout if os.getenv("CAMERA_ONVIF_ZOOM_TIMEOUT") else optics.zoom_timeout_seconds,
+            camera_onvif_zoom_tolerance=settings.camera_onvif_zoom_tolerance if os.getenv("CAMERA_ONVIF_ZOOM_TOLERANCE") else optics.zoom_tolerance)
+    return camera_profile_service.effective(settings)

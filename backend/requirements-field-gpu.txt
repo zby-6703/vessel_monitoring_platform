@@ -1,0 +1,2 @@
+-r requirements-field-base.lock.txt
+onnxruntime-gpu==1.26.0

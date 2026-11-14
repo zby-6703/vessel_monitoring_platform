@@ -14,6 +14,7 @@ class OpticalFollowingMixin:
         self._follow_owned = False
         self._pan_limited = False
         self._last_pan_adjust = None
+        self._prezoom_alignments = 0
         self._body_since = None
         self._body_last_seen = None
         self._body_width = None
@@ -85,6 +86,10 @@ class OpticalFollowingMixin:
         if (not policy.auto_horizontal_follow or self._pan_limited or detail_focus.busy()
                 or self._control_future is not None or self._cycle_halt or self._identity_fallback_active or self._zoom_fallback_active):
             return False
+        prealign = self.phase == "waiting_body" and planned_zoom and planned_zoom > 1 and self._body_entry_reason
+        if policy.detail_capture_priority and (self.phase != "zoomed" or float(self.current_zoom_factor or 1.) <= 1):
+            if not prealign or self._prezoom_alignments >= 1:
+                return False
         if self._last_pan_adjust is not None and timestamp - self._last_pan_adjust < policy.pan_cooldown_seconds:
             return False
         box = self._source_target_box(vessel, image.shape[1], image.shape[0])
@@ -96,6 +101,8 @@ class OpticalFollowingMixin:
             return False
         step = max(-policy.pan_step_limit, min(policy.pan_step_limit, 2 * (center - .5)))
         self._last_pan_adjust = timestamp
+        if prealign:
+            self._prezoom_alignments += 1
         self._pan_displaced = True
         self._pan_resume_phase = self.phase
         self._control_kind = "pan"
@@ -147,7 +154,10 @@ class OpticalFollowingMixin:
             self._pan_offset += step / (2 * factor)
             self._pan_limited = bool(result.get("limited"))
             if self.active:
-                self.catalog[self.active["id"]].setdefault("pan_events", []).append({
+                item = self.catalog[self.active["id"]]
+                if self._pan_limited:
+                    item.update(horizontal_limit_reached=True, pan_limit_zoom_factor=factor)
+                item.setdefault("pan_events", []).append({
                     "source_seconds": self.last_timestamp, "zoom_factor": factor,
                     "fov_x": step, "pan_offset": self._pan_offset, "settled": True,
                     "limited": self._pan_limited, "before": result.get("before"), "after": result.get("after")})
@@ -163,3 +173,37 @@ class OpticalFollowingMixin:
     def _hold_zoom(self, timestamp, policy):
         return self.phase == "zoomed" and (self._zoom_hold_since is None
             or timestamp - self._zoom_hold_since < policy.zoom_min_hold_seconds)
+
+    def _visible_detail_target(self, image, vessels, observation_context):
+        """Keep visible but ambiguous hull footage without assigning identity."""
+        positive = self._positive_unconfirmed_target(image, vessels, observation_context)
+        if positive:
+            return positive
+        for target in self.adaptive_selection["targets"]:
+            direct = self.locked_target and target["target_id"] == self.locked_target["target_id"]
+            if (direct and self._consistent_locked_target(target, allow_ambiguous=True)
+                    or self._geometric_reacquisition(target, allow_ambiguous=True)):
+                return self.target_selector.tracks[target["target_id"]].vessel
+        return None
+
+    def _observe_detail_departure(self, image, vessels, observation_context, timestamp, policy):
+        positive = self._visible_detail_target(image, vessels, observation_context)
+        if positive:
+            self._observe_media_target(positive, image, timestamp)
+            self._empty_since = None
+            self._empty_hits = 0
+            self._association_lost_since = None
+            return
+        if self._hold_zoom(timestamp, policy):
+            self._empty_since = None
+            self._empty_hits = 0
+            return
+        self._association_lost_since = None
+        self._empty_hits += 1
+        if self._empty_since is None:
+            self._empty_since = timestamp
+        elif (timestamp - self._empty_since >= policy.departure_confirm_seconds
+                and self._empty_hits >= policy.departure_min_observations):
+            self._cycle_exit_reason = "vessel_left"
+            self._seal_optical_media(self._media_last_target + policy.departure_confirm_seconds, "vessel_left")
+            self._command_zoom(1., "zooming_out")

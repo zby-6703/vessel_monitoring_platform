@@ -762,6 +762,7 @@ class OpticalCycleMixin(OpticalFollowingMixin):
             self._closed_cycle_pending = False
             self._pan_limited = False
             self._last_pan_adjust = None
+            self._prezoom_alignments = 0
             self._body_since = self._body_last_seen = self._body_width = None
             self._body_hits = 0
             self._body_wait_since = timestamp
@@ -773,7 +774,8 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                         returned_to_overview=False, zoom_events=[], target_id=candidate_id,
                         target_height_ratio=candidate["height_ratio"], selection_reason=self.adaptive_selection["selection_reason"],
                         requested_zoom_factor=self.adaptive_selection["requested_zoom_factor"],
-                        adaptive_zoom=policy.adaptive_zoom_enabled, target_reacquired=False, target_decision=dict(self.locked_target))
+                        adaptive_zoom=policy.adaptive_zoom_enabled, detail_capture_priority=policy.detail_capture_priority,
+                        target_reacquired=False, target_decision=dict(self.locked_target))
             self._record_optical_attributes([candidate])
             for sample_timestamp, encoded in self.buffer:
                 decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
@@ -848,6 +850,7 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                 if self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy):
                     return
                 if (not self._zoom_fallback_active and not self._identity_fallback_active
+                        and not (policy.detail_capture_priority and actual_zoom > 1)
                         and timestamp - self._last_zoom_adjust >= policy.zoom_adjust_cooldown_seconds):
                     plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
                     next_zoom, current = plan["zoom_factor"], actual_zoom
@@ -867,6 +870,11 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                         item.setdefault("zoom_decisions", []).append({"source_seconds": timestamp, "height_ratio": target["height_ratio"], **plan})
                         self._command_zoom(next_zoom, "zooming_in")
                         return
+            elif policy.detail_capture_priority and actual_zoom > 1 and self._zoomed_ship_seen:
+                # After an enlarged-view acquisition, visible uncertain hulls
+                # retain detailed footage. Only fresh absence can finish it;
+                # identity timeout must not zoom out on a still-visible ship.
+                self._observe_detail_departure(image, vessels, observation_context, timestamp, policy)
             elif not self._zoomed_ship_seen or self._association_uncertain:
                 # At first detection in the wide view, the bow can still be
                 # outside the narrower zoomed FOV. Wait for it to arrive before

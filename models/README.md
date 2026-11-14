@@ -1,5 +1,7 @@
 # 当前模型部署包
 
+跨电脑迁移可运行 `conda run -n Train python scripts/package-models.py`，生成 `data/deployment/river-models.zip`。包内只包含 `config/model-files.json` 指定且哈希一致的文件；到新电脑解压后运行 `scripts/check-deployment.py --verify-models --smoke-models`。完整 Windows 步骤见 [现场部署与日常同步](../docs/field-deployment.md)。账号密码、数据库及历史录像不在模型包内。
+
 2026-10-30 起，平台默认使用以下三个独立 ONNX 模型。前两套由本机 `E:/projects/ShipDraft/deployments/` 的同名交付目录复制并校验，船名 OCR 继续使用现有模型。
 
 ```text

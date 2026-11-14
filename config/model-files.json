@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "models/shipdet_rtdetrv4_s_960x544/delivery_manifest.json",
+      "bytes": 696,
+      "sha256": "f89b07b4b4679b65dfb5c4e9e44ed948c623853dce3a4f91818a0e6a88959cc4"
+    },
+    {
+      "path": "models/shipdet_rtdetrv4_s_960x544/deploy_config.yaml",
+      "bytes": 650,
+      "sha256": "8a730cc15f7ee58ed7cbdaa3cd875a6230519d29b9c5e1f2bac7b6c2ded48a4b"
+    },
+    {
+      "path": "models/shipdet_rtdetrv4_s_960x544/model.onnx",
+      "bytes": 41934427,
+      "sha256": "922c3d4e271b23ddc621693a46698db11412c432ab3fa9ccc45e04f425e8c1e9"
+    },
+    {
+      "path": "models/v120_char_water/delivery_manifest.json",
+      "bytes": 869,
+      "sha256": "7bbcd27b116746660bf3e57b6c27636085bbdf467cae7daf755376fd60f63512"
+    },
+    {
+      "path": "models/v120_char_water/deploy_config.yaml",
+      "bytes": 958,
+      "sha256": "f3b69254344e07ef55b7431ab488014e28e8db6d46dd506072f318c12f2084bd"
+    },
+    {
+      "path": "models/v120_char_water/model.onnx",
+      "bytes": 41879654,
+      "sha256": "fd6d0635733dce1a1c6e76855134ff1d1655d6e63434e5abad02d953bdc803e0"
+    },
+    {
+      "path": "models/svtrv2parseq_RecShipName/character_dict.txt",
+      "bytes": 32871,
+      "sha256": "d917d7489d2c20d2e4cee8c17068f8ac54f6ee406a04bf5ac3b1ff5dc38e1e52"
+    },
+    {
+      "path": "models/svtrv2parseq_RecShipName/deploy_config.yaml",
+      "bytes": 820,
+      "sha256": "9bac0cfd24c7023b3afaa9d83234ade6a38839a5cfbbebf99a9ccddf9b239df9"
+    },
+    {
+      "path": "models/svtrv2parseq_RecShipName/model.onnx",
+      "bytes": 102603916,
+      "sha256": "468a0637050767cc36c74acfea2b377a5cbdab7a0ace5161eeaa6632c3b754d4"
+    }
+  ]
+}

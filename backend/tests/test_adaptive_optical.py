@@ -118,7 +118,7 @@ def harness_factory(tmp_path, monkeypatch):
             with manager.lock:
                 manager.catalog[recording_id]["status"] = status
         monkeypatch.setattr(manager, "_encode", finalize)
-        config = {"wait_full_body": False, "zoom_min_hold_seconds": 0, "departure_min_observations": 2,
+        config = {"detail_capture_priority": False, "wait_full_body": False, "zoom_min_hold_seconds": 0, "departure_min_observations": 2,
                   "enabled": True, "recording_mode": "optical_cycle", "zoom_factor": 3,
                   "adaptive_zoom_enabled": True, "target_height_ratio": .6,
                   "min_optical_zoom": 1.1, "max_optical_zoom": 8,

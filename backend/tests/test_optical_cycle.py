@@ -54,7 +54,7 @@ class FakeZoom:
         return {"settled": True}
 
     def validate_cycle(self, factor):
-        if factor not in {1, 3}:
+        if factor not in {1, 2, 3}:
             raise ValueError("指定倍率尚未标定")
 
     def move_to(self, factor):
@@ -66,7 +66,7 @@ class FakeZoom:
         if self.fail_factor == factor:
             raise RuntimeError("镜头运动失败")
         self.events.append(("move_settled", factor))
-        return {"factor": factor, "position": {1: 0, 3: .4}[factor], "settled": True}
+        return {"factor": factor, "position": {1: 0, 2: .2, 3: .4}[factor], "settled": True}
 
 
 class CycleHarness:

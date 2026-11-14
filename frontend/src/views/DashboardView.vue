@@ -74,7 +74,7 @@ const latestStages = computed(() => {
 })
 const monitorName = computed(() => sourceMode.value === 'local' ? localPlayback.value?.filename || '本地视频验证' : stream.value?.name || '现场摄像头')
 const opticalMode = computed(() => settings.value.recording_mode === 'optical_cycle')
-const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && (!settings.value.auto_horizontal_follow || ptz.value.horizontal_follow_supported) && ptz.value.magnifications?.some((factor) => factor > 1 && (settings.value.adaptive_zoom_enabled ? factor >= settings.value.min_optical_zoom && factor <= settings.value.max_optical_zoom : Math.abs(factor - settings.value.zoom_factor) < .001))))
+const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && (!settings.value.auto_horizontal_follow || ptz.value.horizontal_follow_supported) && ptz.value.magnifications?.some((factor) => factor > 1 && (settings.value.adaptive_zoom_enabled ? factor <= settings.value.max_optical_zoom : Math.abs(factor - settings.value.zoom_factor) < .001))))
 const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
 const sourceError = computed(() => sourceMode.value === 'local' ? localPlayback.value?.error : camera.value?.error)
 const levelLabel = (level: string) => ({ normal: '正常', warning: '关注', critical: '超载', unknown: '待判定' }[level] || level)

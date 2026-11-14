@@ -360,9 +360,18 @@ def test_safe_view_restores_detail_floor_even_when_height_suggestion_is_lower(ha
     harness.lens.available_magnifications = lambda: [1, 2, 3, 4, 6, 8]
     harness.warm()
     recording_id = harness.start([ship(y=.36)])
-    assert harness.manager.current_zoom_factor == 1  # vertical margin cannot fit 4x yet
-    harness.feed([ship(y=.39)])  # new settled-view frame starts cooldown
-    harness.feed([ship(y=.39)], advance=1.2)
+    assert harness.manager.current_zoom_factor == 3  # use a lower safe step while 4x cannot fit
+    harness.feed([projected(ship(y=.39), 3)])  # new settled-view frame starts cooldown
+    harness.feed([projected(ship(y=.39), 3)], advance=1.2)
     harness.settle("zoomed")
     assert harness.manager.current_zoom_factor == 4
     assert harness.manager.status()["active_id"] == recording_id
+
+
+def test_only_a_lower_calibrated_step_can_start_the_adaptive_cycle(harness_factory):
+    harness = harness_factory(min_optical_zoom=4)
+    harness.lens.available_magnifications = lambda: [1, 2]
+    harness.warm()
+    harness.start([ship()])
+    assert harness.manager.current_zoom_factor == 2
+    assert harness.manager.error is None

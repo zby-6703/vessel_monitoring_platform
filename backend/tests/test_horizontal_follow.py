@@ -101,6 +101,30 @@ def test_external_pan_is_not_treated_as_our_predicted_view_offset(device):
     assert not calls
 
 
+def test_small_acknowledged_vertical_feedback_drift_does_not_accumulate_as_external_tilt(device):
+    control, state, calls, _, _ = device
+    original = control._request
+    def request(*args):
+        result = original(*args)
+        if args[2] == "RelativeMove": state["y"] += .001
+        return result
+    control._request = request
+    control.begin_horizontal_follow()
+    for _ in range(8):
+        assert control.follow_horizontal(.3, max_travel_ratio=.4, zoom_factor=1)["settled"]
+    assert sum(action == "RelativeMove" for action, _ in calls) == 8
+    assert all(attrs.get("y") == "0" for action, attrs in calls if action == "RelativeMove")
+
+
+def test_intervening_external_vertical_jump_still_prevents_horizontal_dispatch(device):
+    control, state, calls, _, _ = device
+    control.begin_horizontal_follow()
+    state["y"] += .03
+    with pytest.raises(RuntimeError, match="外部上下移动"):
+        control.follow_horizontal(.2, max_travel_ratio=.15, zoom_factor=1)
+    assert not calls
+
+
 def test_uncertain_move_still_stops_and_restores_the_original_position(device):
     control, state, calls, _, _ = device
     control.begin_horizontal_follow()

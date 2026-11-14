@@ -243,7 +243,7 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                 raise ValueError("摄像头控制器不支持自动水平跟随")
             validator()
         if settings.adaptive_zoom_enabled:
-            factors = [factor for factor in self.available_magnifications() if settings.min_optical_zoom <= factor <= settings.max_optical_zoom]
+            factors = [factor for factor in self.available_magnifications() if 1 < factor <= settings.max_optical_zoom]
             if not factors:
                 raise ValueError("自适应范围内没有已标定光学倍率，请先完成倍率标定或调整范围")
             self.zoom_controller.validate_cycle(min(factors))
@@ -764,6 +764,9 @@ class OpticalCycleMixin(OpticalFollowingMixin):
             self._last_pan_adjust = None
             self._body_since = self._body_last_seen = self._body_width = None
             self._body_hits = 0
+            self._body_wait_since = timestamp
+            self._body_observations = 0
+            self._body_entry_reason = self._zoom_wait_reason = None
             item = self.catalog[self.active["id"]]
             item.update(recording_mode="optical_cycle", cycle_index=self.cycle_count + 1,
                         optical_zoom_factor=self._active_zoom_factor, initial_optical_zoom_factor=self._active_zoom_factor,
@@ -813,17 +816,32 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                 if self.phase == "waiting_body":
                     ready = self._body_ready(observed_vessel, image, timestamp, policy)
                     desired = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
-                    if self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy,
-                            planned_zoom=desired["zoom_factor"] if ready else None):
-                        return
                     if not ready:
+                        self._zoom_wait_reason = "waiting_body"
+                        self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy)
                         return
                     plan = self._centered_zoom_plan(target, observed_vessel, image, policy)
+                    if self._body_entry_reason == "body_wait_fallback":
+                        gentle = [factor for factor in self.available_magnifications() if 1 < factor <= min(2., plan["zoom_factor"])]
+                        if not gentle and plan["zoom_factor"] > 1:
+                            plan["selection_reason"] = "no_safe_calibrated_zoom"
+                        plan["zoom_factor"] = max(gentle, default=1.)
+                    if plan["zoom_factor"] <= 1:
+                        # Remain eligible to zoom as the ship moves into a
+                        # better view. A 1x plan is not a completed zoom-in.
+                        self._zoom_wait_reason = plan["selection_reason"]
+                        self.catalog[self.active["id"]]["selection_reason"] = plan["selection_reason"]
+                        self._maybe_follow_horizontal(observed_vessel, image, timestamp, policy,
+                                                      planned_zoom=desired["zoom_factor"])
+                        return
+                    # If the current position already supports a useful zoom,
+                    # take it before another pan resets the entry evidence.
                     self._active_zoom_factor = plan["zoom_factor"]
                     item = self.catalog[self.active["id"]]
                     item.update(optical_zoom_factor=self._active_zoom_factor,
                                 initial_optical_zoom_factor=self._active_zoom_factor,
                                 waiting_full_body=False, body_entered_seconds=timestamp,
+                                body_entry_reason=self._body_entry_reason,
                                 selection_reason=plan["selection_reason"])
                     self._command_zoom(self._active_zoom_factor, "zooming_in")
                     return

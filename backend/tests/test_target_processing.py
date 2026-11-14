@@ -87,6 +87,17 @@ def test_stable_large_target_only_enriches_after_hits_and_time(setup):
     assert models.name_calls == models.draft_calls == 1
 
 
+def test_horizontal_follow_keeps_the_monitoring_roi_with_the_lens_view(setup):
+    processor, service, _ = setup
+    context = {"generation": 1, "zoom_factor": 1., "pan_offset": 1.2, "accept_detections": True}
+    settings = policy(target_roi_left=.2, target_roi_right=.8)
+    for timestamp in (0, .2, .4):
+        result = run(processor, service, timestamp, settings=settings, context=context)
+    assert result.vessels[0].processing["eligible"]
+    outside = run(processor, service, .6, [vessel((810, 400, 990, 550), track=2)], settings, context)
+    assert outside.vessels[0].processing["reason"] == "outside_monitoring_area"
+
+
 def test_interval_and_budget_keep_eligible_targets_while_rotating_work(setup):
     processor, service, models = setup
     settings = policy(target_confirm_hits=1, target_confirm_seconds=0, detail_interval_seconds=.8)

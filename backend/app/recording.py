@@ -38,8 +38,9 @@ class RecordingSettings(BaseModel):
     departure_confirm_seconds: float = Field(default=5, ge=.3, le=30)
     departure_min_observations: int = Field(default=3, ge=2, le=30)
     wait_full_body: bool = True
-    body_entry_margin: float = Field(default=.03, ge=.01, le=.2)
-    body_entry_confirm_seconds: float = Field(default=1, ge=.2, le=10)
+    body_entry_margin: float = Field(default=.01, ge=.01, le=.2)
+    body_entry_confirm_seconds: float = Field(default=.4, ge=.2, le=10)
+    body_entry_max_wait_seconds: float = Field(default=3, ge=1, le=30)
     zoom_min_hold_seconds: float = Field(default=12, ge=0, le=120)
     auto_horizontal_follow: bool = False
     pan_dead_zone: float = Field(default=.15, ge=.05, le=.35)
@@ -553,6 +554,7 @@ class RecordingManager(OpticalCycleMixin):
                     "horizontal_follow": {"enabled": self.settings.auto_horizontal_follow, "moving": self.phase == "panning",
                         "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced},
                     "waiting_full_body": self.phase == "waiting_body",
+                    "zoom_wait_reason": self._zoom_wait_reason if self.phase == "waiting_body" else None,
                     "cycle_count": self.cycle_count, "zoom_driver": "optical" if self._optical_session else "digital",
                     "awaiting_zoomed_target": self._optical_session and self.phase == "zoomed" and not self._zoomed_ship_seen,
                     "identity_fallback": bool(self.active and self._identity_fallback_active),

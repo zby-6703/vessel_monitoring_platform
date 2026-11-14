@@ -18,6 +18,10 @@ class OpticalFollowingMixin:
         self._body_last_seen = None
         self._body_width = None
         self._body_hits = 0
+        self._body_wait_since = None
+        self._body_observations = 0
+        self._body_entry_reason = None
+        self._zoom_wait_reason = None
         self._empty_hits = 0
         self._zoom_hold_since = None
         self._zoom_settled_pending = False
@@ -36,10 +40,14 @@ class OpticalFollowingMixin:
 
     def _body_ready(self, vessel, image, timestamp, policy):
         box = self._source_target_box(vessel, image.shape[1], image.shape[0])
+        if self._body_wait_since is None:
+            self._body_wait_since = timestamp
+        if box and (self._body_last_seen is None or timestamp > self._body_last_seen):
+            self._body_observations += 1
         full = box and box[0] >= policy.body_entry_margin and box[2] <= 1 - policy.body_entry_margin
         width = box[2] - box[0] if box else 0.
         continuous = self._body_last_seen is not None and 0 < timestamp - self._body_last_seen <= 3
-        stable = self._body_width is not None and abs(width - self._body_width) <= max(.01, self._body_width * .1)
+        stable = self._body_width is not None and abs(width - self._body_width) <= max(.02, self._body_width * .3)
         if not full or not continuous or not stable:
             self._body_since = timestamp if full else None
             self._body_hits = 1 if full else 0
@@ -47,8 +55,17 @@ class OpticalFollowingMixin:
         else:
             self._body_hits += 1
         self._body_last_seen = timestamp
-        return bool(full and self._body_since is not None and self._body_hits >= 3
-                    and timestamp - self._body_since + 1e-6 >= policy.body_entry_confirm_seconds)
+        ready = bool(full and self._body_since is not None and self._body_hits >= 2
+                     and timestamp - self._body_since + 1e-6 >= policy.body_entry_confirm_seconds)
+        # A long wait must not require a perfect full hull indefinitely. A
+        # substantial, centred hull with at most one clipped end may enter a
+        # gentle detail view; a narrow bow or both clipped ends still waits.
+        partial_ready = bool(box and self._body_observations >= 2
+            and timestamp - self._body_wait_since >= policy.body_entry_max_wait_seconds
+            and width >= .35 and .2 <= (box[0] + box[2]) / 2 <= .8
+            and not (box[0] <= .003 and box[2] >= .997))
+        self._body_entry_reason = "full_body" if ready else "body_wait_fallback" if partial_ready else None
+        return ready or partial_ready
 
     def _centered_zoom_plan(self, target, vessel, image, policy):
         plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())

@@ -114,7 +114,10 @@ class HorizontalFollowMixin:
             movement_epsilon = (native["x"]["max"] - native["x"]["min"]) * .00001
             if abs(before["x"] - origin["last"]["x"]) > tolerance * 4:
                 raise RuntimeError("其他控制端改变了云台位置，已暂停自动跟随")
-            if abs(before["y"] - origin["position"]["y"]) > (native["y"]["max"] - native["y"]["min"]) * .002:
+            # Acknowledged tiny per-step feedback drift must not accumulate
+            # into an alleged external tilt. Each step still checks its own
+            # vertical feedback, and an intervening vertical jump is rejected.
+            if abs(before["y"] - origin["last"]["y"]) > (native["y"]["max"] - native["y"]["min"]) * .002:
                 raise RuntimeError("检测到外部上下移动，已暂停水平跟随")
             travel = (native["x"]["max"] - native["x"]["min"]) * max_travel_ratio
             used = before["x"] - origin["position"]["x"]

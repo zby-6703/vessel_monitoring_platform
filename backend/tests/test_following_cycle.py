@@ -43,6 +43,77 @@ def test_transient_full_width_detection_does_not_satisfy_body_admission(cycle_fa
     assert h.manager.phase == "waiting_body" and h.controller.calls == [1]
 
 
+def test_two_full_body_observations_with_normal_width_jitter_allow_zoom(cycle_factory):
+    h = cycle_factory(wait_full_body=True, body_entry_confirm_seconds=.4)
+    h.warm()
+    h.feed([hull(.2, .5)])
+    h.feed([hull(.2, .6)], advance=.5)
+    h.feed([hull(.2, .49)], advance=.5)
+    h.phase("zoomed")
+    assert h.controller.calls == [1, 3]
+
+
+def test_useful_two_x_zoom_precedes_another_pre_zoom_centering_pan(cycle_factory):
+    h = cycle_factory(wait_full_body=True, auto_horizontal_follow=True)
+    h.controller.available_magnifications = lambda: [1, 2, 3]
+    h.warm()
+    for _ in range(3): h.feed([hull(.47, .3)], advance=.5)
+    h.phase("zoomed")
+    assert h.controller.calls == [1, 2]
+    assert not h.controller.pan_calls
+
+
+def test_horizontal_step_does_not_restart_the_bounded_entry_wait(cycle_factory):
+    h = cycle_factory(wait_full_body=True, auto_horizontal_follow=True,
+                      body_entry_confirm_seconds=10, body_entry_max_wait_seconds=1)
+    h.controller.available_magnifications = lambda: [1, 2, 3]
+    h.warm()
+    h.feed([hull(.59, .36)])
+    h.feed([hull(.59, .36)], advance=.2)
+    h.drain_control()
+    assert len(h.controller.pan_calls) == 1
+    h.feed([hull(.59, .36)], advance=.2)
+    h.feed([hull(.59, .36)], advance=1)
+    h.phase("zoomed")
+    assert h.controller.calls == [1, 2]
+    assert len(h.controller.pan_calls) == 1
+
+
+def test_substantial_partial_hull_can_use_gentle_zoom_after_bounded_wait(cycle_factory):
+    h = cycle_factory(wait_full_body=True, body_entry_max_wait_seconds=1)
+    h.controller.available_magnifications = lambda: [1, 2, 3]
+    h.warm()
+    for _ in range(4): h.feed([hull(-.02, .92)], advance=.5)
+    h.phase("zoomed")
+    item = h.manager.catalog[h.manager.active["id"]]
+    assert h.controller.calls == [1, 2]
+    assert item["body_entry_reason"] == "body_wait_fallback"
+
+
+def test_wait_timeout_never_promotes_a_narrow_entering_bow(cycle_factory):
+    h = cycle_factory(wait_full_body=True, body_entry_max_wait_seconds=1)
+    h.controller.available_magnifications = lambda: [1, 2, 3]
+    h.warm()
+    for _ in range(8): h.feed([hull(-.02, .2)], advance=.5)
+    assert h.manager.phase == "waiting_body" and h.controller.calls == [1]
+
+
+def test_one_x_entry_plan_is_retried_when_vertical_position_improves(cycle_factory):
+    h = cycle_factory(wait_full_body=True)
+    h.controller.available_magnifications = lambda: [1, 2, 3]
+    h.warm()
+    def boat(y):
+        value = hull(.35, .3)
+        value["boxes"][0]["xywh"][1:] = [y * 48, .3 * 64, .14 * 48]
+        return value
+    for _ in range(4): h.feed([boat(.7)], advance=.5)
+    assert h.manager.phase == "waiting_body" and h.controller.calls == [1]
+    assert h.manager.status()["zoom_wait_reason"] == "off_axis_limited"
+    for y in (.67, .64, .61, .58, .55): h.feed([boat(y)], advance=.5)
+    h.phase("zoomed")
+    assert h.controller.calls == [1, 2]
+
+
 def test_horizontal_follow_keeps_identity_in_the_reference_plane_and_returns_home(cycle_factory):
     h = cycle_factory(auto_horizontal_follow=True, pan_cooldown_seconds=.5)
     h.warm()

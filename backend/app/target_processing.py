@@ -242,7 +242,10 @@ class RealtimeTargetProcessor:
             height_ok = stable_height >= settings.min_target_height_ratio * factor
             horizontal_entry = zoom == 1 and evidence.entry_side is not None
             width_ok = horizontal_entry or stable_width >= settings.min_target_width_ratio * factor
-            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            # The monitoring ROI follows the horizontal camera view. Keep
+            # identity/size in the reference plane, but remove pan translation
+            # for this lens-relative ROI test (zoom alone does not move it).
+            cx, cy = (box[0] + box[2]) / 2 - context.get("pan_offset", 0.), (box[1] + box[3]) / 2
             inside = settings.target_roi_left <= cx <= settings.target_roi_right and settings.target_roi_top <= cy <= settings.target_roi_bottom
             reason = "eligible"
             if not height_ok or not width_ok:

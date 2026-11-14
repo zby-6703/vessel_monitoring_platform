@@ -119,6 +119,7 @@ export interface RecordingSettings {
   wait_full_body: boolean
   body_entry_margin: number
   body_entry_confirm_seconds: number
+  body_entry_max_wait_seconds: number
   zoom_min_hold_seconds: number
   departure_min_observations: number
   enable_ship_name: boolean
@@ -167,7 +168,7 @@ export interface RecordingSettings {
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
   auto_horizontal_follow: false, pan_dead_zone: .15, pan_step_limit: .3, pan_cooldown_seconds: 2, pan_max_travel_ratio: .15,
-  wait_full_body: true, body_entry_margin: .03, body_entry_confirm_seconds: 1, zoom_min_hold_seconds: 12, departure_min_observations: 3,
+  wait_full_body: true, body_entry_margin: .01, body_entry_confirm_seconds: .4, body_entry_max_wait_seconds: 3, zoom_min_hold_seconds: 12, departure_min_observations: 3,
   enable_ship_name: true, enable_draft: true, auto_region_focus: false,
   target_filter_enabled: true, min_target_height_ratio: .06, min_target_width_ratio: .12,
   target_confirm_hits: 3, target_confirm_seconds: .4,
@@ -235,12 +236,14 @@ const additionalSelectionReasons: Record<string, string> = {
   vertical_clipped: '船体竖直方向被裁切，继续观察',
   stale_observation: '观测已过期，等待新画面',
   horizontal_view_limited: '受水平取景限制，降低倍率以保留船体中心',
+  waiting_body: '正在等待船舶主体进入画面',
 }
 export const selectionReasonLabel = (reason?: string) => additionalSelectionReasons[reason || ''] || baseSelectionReasonLabel(reason)
 export type OpticalCyclePhase = 'overview' | 'initializing' | 'waiting_body' | 'panning' | 'zooming_in' | 'zoomed' | 'zooming_out' | 'rearming' | 'recovering' | 'error'
-export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', waiting_body: '全景录制 · 等待船体完整入画', panning: '自动左右跟随 · 保持俯仰', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', recovering: '镜头通信中断 · 正在恢复 1×', error: '光学循环异常' }[phase || 'overview'])
+export const cyclePhaseLabel = (phase?: OpticalCyclePhase, awaitingTarget = false) => phase === 'zoomed' && awaitingTarget ? '等待目标船进入放大视野' : ({ overview: '1× 全景选船', waiting_body: '全景录制 · 等待合适放大时机', panning: '自动左右跟随 · 保持俯仰', initializing: '正在归位至 1×', zooming_in: '正在调整光学倍率', zoomed: '录制已锁定的目标船舶', zooming_out: '正在缩回 1×', rearming: '本轮保存 · 全景重新选船', recovering: '镜头通信中断 · 正在恢复 1×', error: '光学循环异常' }[phase || 'overview'])
 export interface RecordingStatus {
   waiting_full_body?: boolean
+  zoom_wait_reason?: string | null
   horizontal_follow?: { enabled: boolean; moving: boolean; offset: number; limited: boolean; return_pending: boolean }
   state: 'disabled' | 'armed' | 'recording' | 'error'
   active_id: string | null

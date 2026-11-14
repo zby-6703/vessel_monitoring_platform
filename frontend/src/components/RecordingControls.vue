@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { Camera, Check, Crosshair, HardDrive, RefreshCw, Save, Settings2, Video, ZoomIn } from 'lucide-vue-next'
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
+import type { FocusRegion, FocusStatus } from '../api'
 import { cyclePhaseLabel, formatBytes, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
 
-const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; sourceStatus?: string; processingSummary?: ProcessingSummary | null }>()
-const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'refresh-ptz': [] }>()
+const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; sourceStatus?: string; processingSummary?: ProcessingSummary | null; focusStatus?: FocusStatus | null }>()
+const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'refresh-ptz': []; 'pick-focus': []; 'stop-focus': []; 'focus-region': [region: FocusRegion] }>()
+const region = reactive({ left: .25, top: .25, right: .75, bottom: .75 })
 function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettings[K]) {
   const next = { ...props.modelValue, [field]: value }
   if (next.max_clip_seconds <= next.pre_roll_seconds) next.max_clip_seconds = next.pre_roll_seconds + 1
@@ -59,10 +61,17 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
   <article class="panel recording-controls" :aria-busy="!loaded">
     <header class="panel-header"><div><span class="section-kicker">检测 → 筛选 → 识别 / 录制</span><h2><Video :size="16" />目标筛选与循环录制</h2></div><span class="recording-state" :class="status?.state"><i></i>{{ stateLabel }}</span></header>
     <div class="recording-controls-body">
+      <section class="realtime-recognition" aria-label="实时识别功能开关">
+        <strong>实时推理功能</strong>
+        <div class="recognition-toggle"><span>船名识别</span><el-switch :model-value="modelValue.enable_ship_name" :disabled="!loaded || saving" aria-label="开启实时船名识别" @update:model-value="set('enable_ship_name', Boolean($event))" /></div>
+        <div class="recognition-toggle"><span>吃水测量</span><el-switch :model-value="modelValue.enable_draft" :disabled="!loaded || saving" aria-label="开启实时吃水测量" @update:model-value="set('enable_draft', Boolean($event))" /></div>
+        <p class="setting-hint">保存后生效。关闭可释放对应模型，优先检测、跟踪与录制；通行视频可随后提交完整离线分析。</p>
+        <el-tag v-if="!modelValue.enable_ship_name && !modelValue.enable_draft" type="success" size="small">检测与跟踪优先</el-tag>
+      </section>
       <section class="target-filter-panel" aria-label="重点船舶筛选与识别策略">
-        <div class="target-filter-heading"><div><strong>优先识别符合条件的大目标</strong><p>{{ modelValue.target_filter_enabled ? '小目标保留检测框与轨迹，跳过船名、吃水识别及录像触发。' : '筛选已关闭，恢复全部目标的完整识别流程。' }}</p></div><el-switch :model-value="modelValue.target_filter_enabled" :disabled="!loaded || saving" aria-label="启用重点船舶筛选" @update:model-value="set('target_filter_enabled', Boolean($event))" /></div>
+        <div class="target-filter-heading"><div><strong>优先识别符合条件的大目标</strong><p>{{ modelValue.target_filter_enabled ? '小目标保留检测框与轨迹，跳过船名、吃水识别及录像触发。' : '筛选已关闭，按上方已开启的功能处理全部目标。' }}</p></div><el-switch :model-value="modelValue.target_filter_enabled" :disabled="!loaded || saving" aria-label="启用重点船舶筛选" @update:model-value="set('target_filter_enabled', Boolean($event))" /></div>
         <p class="setting-hint">筛选独立于录制开关，适用于现场摄像头和本地回放。仍对整幅画面运行船舶检测，减少的是后续识别开销；离线分析保持原流程。</p>
-        <div v-if="processingSummary" class="processing-summary" aria-label="当前画面处理分流"><span>检测 <strong>{{ processingSummary.detected }}</strong></span><span>入选 <strong>{{ processingSummary.eligible }}</strong></span><span>本帧完整识别 <strong>{{ processingSummary.detail_inferred }}</strong></span><span>轻量处理 <strong>{{ processingSummary.lightweight }}</strong></span></div>
+        <div v-if="processingSummary" class="processing-summary" aria-label="当前画面处理分流"><span>检测 <strong>{{ processingSummary.detected }}</strong></span><span>入选 <strong>{{ processingSummary.eligible }}</strong></span><span>本帧详细识别 <strong>{{ processingSummary.detail_inferred }}</strong></span><span>轻量处理 <strong>{{ processingSummary.lightweight }}</strong></span></div>
         <el-form v-if="modelValue.target_filter_enabled" label-position="top" class="recording-settings-grid">
           <el-form-item label="入选最小船高 (1×画面 %)"><el-input-number :model-value="Number((modelValue.min_target_height_ratio * 100).toFixed(1))" :min="0" :max="80" :step="1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('min_target_height_ratio', Number($event) / 100)" /></el-form-item>
           <el-form-item label="入选最小船宽 (1×画面 %)"><el-input-number :model-value="Number((modelValue.min_target_width_ratio * 100).toFixed(1))" :min="0" :max="100" :step="1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('min_target_width_ratio', Number($event) / 100)" /></el-form-item>
@@ -79,7 +88,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
               <el-form-item label="区域上边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_top * 100)" :min="0" :max="99" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_top', Number($event) / 100)" /></el-form-item>
               <el-form-item label="区域下边界 (%)"><el-input-number :model-value="Math.round(modelValue.target_roi_bottom * 100)" :min="1" :max="100" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('target_roi_bottom', Number($event) / 100)" /></el-form-item>
               <el-form-item label="同一目标识别间隔 (秒)"><el-input-number :model-value="modelValue.detail_interval_seconds" :min="0" :max="30" :step=".1" :precision="1" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('detail_interval_seconds', Number($event))" /></el-form-item>
-              <el-form-item label="每帧最多完整识别目标"><el-input-number :model-value="modelValue.max_detail_targets" :min="1" :max="8" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('max_detail_targets', Number($event))" /></el-form-item>
+              <el-form-item label="每帧最多详细识别目标"><el-input-number :model-value="modelValue.max_detail_targets" :min="1" :max="8" :disabled="!loaded || saving" controls-position="right" @update:model-value="set('max_detail_targets', Number($event))" /></el-form-item>
             </el-form>
             <p v-if="!roiValid" class="recording-error" role="alert">区域左边界必须小于右边界，上边界必须小于下边界。</p>
             <p class="setting-hint">多目标按优先级分配完整识别机会，间隔期间继续跟踪。停泊判断、运动证据和镜头视野限制仍参与录制选船。</p>
@@ -156,10 +165,33 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           </el-form>
           <p class="setting-hint">{{ optical ? '每个正常循环保存一个视频，包含放大与缩回过程。异常超时用于防止镜头或模型故障导致无限录制。' : '短暂漏检通过延录合并，长时间有船自动分段。' }} 达到容量或保留天数上限时，自动清理最早的已结束视频。</p>
         </el-collapse-item>
-        <el-collapse-item name="ptz"><template #title><Crosshair :size="14" />镜头手动操作 / 对焦</template>
+        <el-collapse-item name="detail-focus" title="船名 / 吃水区域对焦">
+          <div class="recognition-toggle">
+          <span>锁定目标后自动选区对焦</span>
+          <el-switch :model-value="modelValue.auto_region_focus" :disabled="!loaded || saving" aria-label="自动区域对焦" @update:model-value="set('auto_region_focus', Boolean($event))" />
+          </div>
+          <p class="setting-hint">光学镜头到位后，优先船名区域，其次吃水区域、船体；使用少量新画面的清晰度反馈微调真实焦点。无需开启船名或吃水推理。近似清晰度不能保证文字一定可读。</p>
+          <p v-if="ptz?.region_focus_error" class="setting-hint">{{ ptz.region_focus_error }}</p>
+          <p role="status">{{ focusStatus?.status === 'focusing' ? '正在对焦 · 录像继续' : focusStatus?.status === 'completed' ? '选区对焦已完成' : focusStatus?.status === 'failed' ? '区域对焦失败' : focusStatus?.status === 'cancelled' ? '区域对焦已停止' : '等待区域对焦' }}</p>
+          <p v-if="focusStatus?.error" class="recording-error" role="alert">{{ focusStatus.error }}</p>
+          <div class="ptz-buttons">
+          <el-button :disabled="sourceMode !== 'camera' || !sourceRunning || !ptz?.region_focus_supported || manualBusy || focusStatus?.status === 'focusing'" @click="emit('pick-focus')">画面框选区域</el-button>
+          <el-button :disabled="focusStatus?.status !== 'focusing'" @click="emit('stop-focus')">停止对焦</el-button>
+          </div>
+          <p class="setting-hint">手动框选前关闭自动循环。也可输入区域边界（0–1）后对焦：</p>
+          <el-form label-position="top" class="recording-settings-grid">
+          <el-form-item v-for="field in (['left', 'top', 'right', 'bottom'] as const)" :key="field" :label="({ left: '左', top: '上', right: '右', bottom: '下' })[field]">
+          <el-input-number v-model="region[field]" :min="0" :max="1" :step=".05" :precision="2" />
+          </el-form-item>
+          </el-form>
+          <el-button :disabled="sourceMode !== 'camera' || !sourceRunning || !ptz?.region_focus_supported || manualBusy || focusStatus?.status === 'focusing' || region.left >= region.right || region.top >= region.bottom" @click="emit('focus-region', { ...region })">按坐标对焦</el-button>
+          </el-collapse-item>
+          <el-collapse-item name="ptz">
+          <template #title>
+          <Crosshair :size="14" />镜头手动操作 / 对焦</template>
           <p class="setting-hint">{{ manualBusy ? '循环已开启，请先关闭循环并等待镜头回到 1× 后再进行手动操作。' : ptz?.error || '手动变焦会改变实际取景，原位由摄像头预先设置。' }}</p>
           <p v-if="ptz?.focus_error" class="setting-hint">{{ ptz.focus_error }}</p>
-          <div class="ptz-buttons"><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'zoom_in')">光学放大</el-button><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'zoom_out')">光学缩小</el-button><el-button :disabled="!ptz?.focus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'focus_near')">近焦</el-button><el-button :disabled="!ptz?.focus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'focus_far')">远焦</el-button><el-button :disabled="!ptz?.autofocus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'autofocus')">自动对焦</el-button><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'home')">回设备原位</el-button><el-button :disabled="!(ptz?.supported || ptz?.absolute_zoom_supported || status?.zoom_driver === 'optical')" type="danger" plain @click="emit('ptz', 'stop')">紧急停止运动</el-button></div>
+          <div class="ptz-buttons"><el-button v-for="direction in (['pan_left', 'pan_right', 'tilt_up', 'tilt_down'] as const)" :key="direction" :disabled="sourceMode !== 'camera' || !ptz?.pan_tilt_supported || ptzBusy || manualBusy || focusStatus?.status === 'focusing'" @click="emit('ptz', direction)">{{ ({ pan_left: '向左', pan_right: '向右', tilt_up: '向上', tilt_down: '向下' })[direction] }}</el-button><el-button :disabled="sourceMode !== 'camera' || !ptz?.absolute_pan_tilt_supported || ptzBusy || manualBusy || focusStatus?.status === 'focusing'" @click="emit('ptz', 'save_view')">保存监测机位</el-button><el-button :disabled="sourceMode !== 'camera' || !ptz?.absolute_pan_tilt_supported || ptzBusy || manualBusy || focusStatus?.status === 'focusing'" @click="emit('ptz', 'restore_view')">恢复监测机位</el-button></div><p class="setting-hint">方向按钮每次小幅移动并停止。先在已标定 1× 保存监测机位，调整后可回到该机位；改变朝向后请检查监测区域。</p><div class="ptz-buttons"><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'zoom_in')">光学放大</el-button><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'zoom_out')">光学缩小</el-button><el-button :disabled="!ptz?.focus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'focus_near')">近焦</el-button><el-button :disabled="!ptz?.focus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'focus_far')">远焦</el-button><el-button :disabled="!ptz?.autofocus_supported || ptzBusy || manualBusy" @click="emit('ptz', 'autofocus')">自动对焦</el-button><el-button :disabled="!ptz?.supported || ptzBusy || manualBusy" @click="emit('ptz', 'home')">回设备原位</el-button><el-button :disabled="!(ptz?.supported || ptz?.pan_tilt_supported || ptz?.focus_supported || ptz?.absolute_zoom_supported || status?.zoom_driver === 'optical')" type="danger" plain @click="emit('ptz', 'stop')">紧急停止运动</el-button></div>
         </el-collapse-item>
       </el-collapse>
       <div class="recording-storage"><HardDrive :size="14" /><span>{{ formatBytes(status?.storage_bytes || 0) }} / {{ modelValue.max_storage_gb }} GB</span><span v-if="!optical">缓冲 {{ (status?.buffer_seconds || 0).toFixed(1) }} s</span></div>
@@ -169,3 +201,8 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
     </div>
   </article>
 </template>
+
+<style scoped>
+.realtime-recognition { padding: 12px; margin-bottom: 14px; border: 1px solid var(--el-border-color); border-radius: 8px; }
+.recognition-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; }
+</style>

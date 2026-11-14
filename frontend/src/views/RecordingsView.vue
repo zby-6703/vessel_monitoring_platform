@@ -2,7 +2,19 @@
 import { Download, Film, Play, RefreshCw, Search, Trash2, Video, X } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiError, deleteRecording, formatBytes, getRecordings, selectionReasonLabel, type RecordingItem } from '../api'
+import { analyzeRecording, apiError, deleteRecording, formatBytes, getRecording, getRecordings, selectionReasonLabel, type RecordingItem } from '../api'
+import { useRoute } from 'vue-router'
+const route = useRoute()
+const analyzing = ref('')
+const analysisLabels: Record<string, string> = { queued: '等待离线分析', running: '离线分析中', completed: '离线分析完成', failed: '离线分析失败', cancelled: '分析已取消' }
+const analysisLabel = (item: RecordingItem) => analysisLabels[item.analysis?.status || ''] || '尚未离线分析'
+const analysisActive = (item: RecordingItem) => ['queued', 'running'].includes(item.analysis?.status || '')
+async function analyze(item: RecordingItem) {
+  analyzing.value = item.id
+  try { await analyzeRecording(item.id); ElMessage.success('已创建完整离线作业，包含检测、跟踪、船名及吃水'); await load(false, true) }
+  catch (error) { ElMessage.error(apiError(error, '提交离线分析失败')) }
+  finally { analyzing.value = '' }
+}
 const filters = reactive({ query: '', camera_id: '', dates: [] as string[] })
 const recordings = ref<RecordingItem[]>([])
 const total = ref(0)
@@ -61,8 +73,15 @@ async function remove(item: RecordingItem) {
     await load(); ElMessage.success('通行视频已删除')
   } catch (error) { ElMessage.error(apiError(error, '删除失败')) } finally { deleting.value = null }
 }
-onMounted(() => { load(); refreshTimer = window.setInterval(() => load(false, true), 10000) })
-onBeforeUnmount(() => clearInterval(refreshTimer))
+let disposed = false
+onMounted(async () => {
+  await load()
+  if (typeof route.query.recording === 'string') {
+    try { open(await getRecording(route.query.recording)) } catch (error) { ElMessage.error(apiError(error, '录像不存在')) }
+  }
+  if (!disposed) refreshTimer = window.setInterval(() => load(false, true), 3000)
+})
+onBeforeUnmount(() => { disposed = true; clearInterval(refreshTimer) })
 </script>
 
 <template>
@@ -84,7 +103,7 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
           <img v-if="item.thumbnail_url" :src="item.thumbnail_url" alt="船舶通行关键帧" loading="lazy" /><div v-else class="recording-thumbnail-placeholder"><Film :size="34" /><span>{{ item.status === 'recording' ? '船舶通行录制中' : item.status === 'processing' ? '正在准备浏览器播放' : '暂无关键帧' }}</span></div>
           <span class="recording-card-state" :class="item.status">{{ statusLabel(item.status) }}</span><span class="recording-duration mono">{{ durationLabel(item.duration_seconds) }}</span><span v-if="originalUrl(item)" class="recording-play"><Play :size="22" fill="currentColor" /></span>
         </button>
-        <div class="recording-card-body"><time>{{ dateLabel(item.started_at) }}</time><h3 :title="item.ship_names.join(' / ')">{{ item.ship_names.length ? item.ship_names.join(' / ') : '船名待识别' }}</h3><p class="recording-source" :title="item.source_name">{{ item.source_name }} <span>· {{ item.camera_id }}</span></p><div class="recording-tags"><span v-if="item.tail_trimmed">已移除多余尾段</span><template v-if="isOptical(item)"><span v-if="item.identity_fallback">目标关联恢复 · 全景保底</span><span>{{ item.zoom_fallback ? '故障保底视频' : magnification(item) ? `已确认 ${magnification(item)}×` : '镜头倍率未确认' }}</span><span>{{ item.returned_to_overview ? '已确认回到 1×' : '回 1× 尚未确认' }}</span><span v-if="item.cycle_index">第 {{ item.cycle_index }} 轮</span></template><template v-else><span v-if="item.original_url">全景原视频</span><span v-if="item.has_focus">数字聚焦特写</span></template><span v-if="item.track_ids.length">{{ item.track_ids.length }} 个轨迹</span></div><div class="recording-card-meta"><span>{{ formatBytes(item.bytes) }}</span><span>{{ reasonLabel(item.reason, isOptical(item)) }}</span></div><div class="recording-card-actions"><el-button size="small" :disabled="!originalUrl(item)" @click="open(item)"><Play :size="13" />回看</el-button><a v-if="originalUrl(item)" class="download-link" :href="downloadUrl(originalUrl(item))" download><Download :size="14" />{{ isOptical(item) ? '本轮视频' : '原视频' }}</a><el-button text type="danger" size="small" :loading="deleting === item.id" :disabled="['recording', 'processing'].includes(item.status)" aria-label="删除通行视频" @click="remove(item)"><Trash2 :size="14" /></el-button></div></div>
+        <div class="recording-card-body"><time>{{ dateLabel(item.started_at) }}</time><h3 :title="item.ship_names.join(' / ')">{{ item.ship_names.length ? item.ship_names.join(' / ') : '船名待识别' }}</h3><p class="recording-source" :title="item.source_name">{{ item.source_name }} <span>· {{ item.camera_id }}</span></p><div class="recording-tags"><span v-if="item.tail_trimmed">已移除多余尾段</span><template v-if="isOptical(item)"><span v-if="item.identity_fallback">目标关联恢复 · 全景保底</span><span>{{ item.zoom_fallback ? '故障保底视频' : magnification(item) ? `已确认 ${magnification(item)}×` : '镜头倍率未确认' }}</span><span>{{ item.returned_to_overview ? '已确认回到 1×' : '回 1× 尚未确认' }}</span><span v-if="item.cycle_index">第 {{ item.cycle_index }} 轮</span></template><template v-else><span v-if="item.original_url">全景原视频</span><span v-if="item.has_focus">数字聚焦特写</span></template><span v-if="item.track_ids.length">{{ item.track_ids.length }} 个轨迹</span></div><div class="recording-card-meta"><span>{{ formatBytes(item.bytes) }}</span><span>{{ reasonLabel(item.reason, isOptical(item)) }}</span></div><p class="analysis-state" role="status">{{ analysisLabel(item) }}<template v-if="item.analysis_result?.draft_depths_m.length"> · 吃水 {{ item.analysis_result.draft_depths_m.map(value => value.toFixed(2) + ' m').join(' / ') }}</template></p><p v-if="item.analysis?.error" class="recording-error" role="alert">{{ item.analysis.error }}</p><div class="recording-card-actions"><el-button size="small" :loading="analyzing === item.id || analysisActive(item)" :disabled="!originalUrl(item) || analysisActive(item)" @click="analyze(item)">{{ item.analysis?.status === 'completed' ? '重新分析' : item.analysis?.status === 'failed' || item.analysis?.status === 'cancelled' ? '重试分析' : '完整离线分析' }}</el-button><RouterLink v-if="item.analysis" class="download-link" :to="{ path: '/offline', query: { job: item.analysis.id } }">查看作业</RouterLink><el-button size="small" :disabled="!originalUrl(item)" @click="open(item)"><Play :size="13" />回看</el-button><a v-if="originalUrl(item)" class="download-link" :href="downloadUrl(originalUrl(item))" download><Download :size="14" />{{ isOptical(item) ? '本轮视频' : '原视频' }}</a><el-button text type="danger" size="small" :loading="deleting === item.id" :disabled="['recording', 'processing'].includes(item.status) || analysisActive(item)" aria-label="删除通行视频" @click="remove(item)"><Trash2 :size="14" /></el-button></div></div>
       </article>
     </section>
     <div v-if="!loading && !recordings.length" class="archive-empty panel"><Film :size="38" /><h3>{{ requestError ? '视频暂不可用' : filters.query || filters.camera_id || filters.dates.length ? '没有符合条件的通行视频' : '等待第一轮光学循环' }}</h3><p>{{ requestError ? '请确认后端服务可用后重试。' : '在实时监测中确认摄像头倍率标定，开启光学变焦循环并启动采集，每轮回到 1× 后生成一个视频。' }}</p><RouterLink to="/" class="text-link">前往实时监测 →</RouterLink></div>
@@ -99,7 +118,7 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
         <p v-if="isOptical(selected) && zoomTrail(selected)" class="setting-hint">已确认镜头倍率：{{ zoomTrail(selected) }}</p>
         <p class="setting-hint">{{ isOptical(selected) ? '本视频围绕已锁定的一艘目标船录制，背景船或停泊船不会自动延长本轮。正常轮次确认回到 1× 后结束；目标重识别不明确或异常中断时保留已拍摄画面并标明原因。' : '全景保存采集到的完整画面，数字特写随取景策略裁剪放大。切换视角时保留播放位置。' }}</p>
         <p v-if="isOptical(selected) && selected.returned_to_overview === false" class="optical-local-note">本轮结束时未能确认镜头回到 1×，请检查摄像头连接与镜头状态。</p>
-        <p v-if="selected.error" class="recording-error" role="alert">{{ selected.error }}</p>
+        <p v-for="(event, index) in selected.focus_events || []" :key="index" class="setting-hint">区域对焦：{{ event.status === 'completed' ? '已完成' : event.status === 'cancelled' ? '已停止' : '未完成' }}<template v-if="event.result"> · 区域清晰度 {{ event.result.sharpness_before.toFixed(1) }} → {{ event.result.sharpness_best.toFixed(1) }}</template><template v-if="event.error"> · {{ event.error }}</template></p><section class="passage-analysis-detail"><h3>完整离线分析</h3><p role="status">{{ analysisLabel(selected) }}</p><p v-if="selected.analysis_result">已回写 {{ selected.analysis_result.instances.length }} 条船舶结果 · {{ selected.analysis_result.completed_at ? dateLabel(selected.analysis_result.completed_at) : '' }}</p><el-table v-if="selected.analysis_result" :data="selected.analysis_result.instances"><el-table-column prop="instance_id" label="离线轨迹" /><el-table-column prop="recognized_zh" label="船名" /><el-table-column prop="draft_depth_m" label="吃水 (m)" /><el-table-column prop="status" label="核验状态" /></el-table><el-button :disabled="!originalUrl(selected) || analysisActive(selected)" :loading="analyzing === selected.id || analysisActive(selected)" @click="analyze(selected)">提交完整离线分析</el-button><RouterLink v-if="selected.analysis" :to="{ path: '/offline', query: { job: selected.analysis.id } }" class="download-link">查看关联作业与可视化</RouterLink><p v-if="selected.analysis?.error" class="recording-error" role="alert">{{ selected.analysis.error }}</p></section><p v-if="selected.error" class="recording-error" role="alert">{{ selected.error }}</p>
       </div>
       <template #footer><div class="recording-dialog-footer"><a v-if="selected && originalUrl(selected)" class="download-link" :href="downloadUrl(originalUrl(selected))" download><Download :size="15" />{{ isOptical(selected) ? '下载本轮视频' : '下载全景原视频' }}</a><a v-if="selected?.focused_url && !isOptical(selected)" class="download-link" :href="downloadUrl(selected.focused_url)" download><Download :size="15" />下载数字聚焦特写</a><el-button @click="selected = null">关闭</el-button></div></template>
     </el-dialog>

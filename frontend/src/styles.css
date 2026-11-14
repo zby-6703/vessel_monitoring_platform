@@ -509,6 +509,11 @@ img { display: block; max-width: 100%; }
 .recording-play { position: absolute; top: 50%; left: 50%; display: grid; place-items: center; width: 48px; height: 48px; border: 1px solid rgb(255 255 255 / 45%); color: white; background: rgb(13 27 33 / 65%); border-radius: 50%; transform: translate(-50%, -50%); opacity: 0; transition: opacity 160ms; }
 .recording-thumbnail:hover .recording-play, .recording-thumbnail:focus-visible .recording-play { opacity: 1; }
 .recording-card-body { padding: 14px; }
+.recording-card-actions { flex-wrap: wrap; }
+.analysis-state { color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
+.passage-analysis-detail { margin-top: 16px; padding: 14px; border: 1px solid var(--el-border-color); border-radius: 8px; }
+.passage-analysis-detail > .el-button, .passage-analysis-detail > .download-link { margin-top: 12px; margin-right: 12px; }
+.passage-job-source { line-height: 1.7; overflow-wrap: anywhere; }
 .recording-card-body time { color: var(--text-muted); font: 10px 'Fira Code', monospace; }
 .recording-card-body h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 8px 0; font-size: 15px; font-weight: 500; }
 .recording-source { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin: 0 0 12px; color: var(--text-secondary); font-size: 10px; }

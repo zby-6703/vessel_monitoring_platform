@@ -41,6 +41,7 @@ class RealtimeTargetProcessor:
     TIME_EPSILON = 1e-6
 
     POLICY_FIELDS = (
+        "enable_ship_name", "enable_draft",
         "target_filter_enabled", "min_target_height_ratio", "min_target_width_ratio",
         "target_confirm_hits", "target_confirm_seconds", "target_roi_left",
         "target_roi_top", "target_roi_right", "target_roi_bottom",
@@ -110,11 +111,18 @@ class RealtimeTargetProcessor:
         self._serial += 1
         self._last_time = timestamp
 
+        if hasattr(getattr(service, "models", None), "trim_details"):
+            service.models.trim_details(enable_ship_name=settings.enable_ship_name, enable_draft=settings.enable_draft)
+        details_enabled = settings.enable_ship_name or settings.enable_draft
+
         # Preserve legacy full recognition when the explicit filter is off.
         if not settings.target_filter_enabled:
             for index, vessel in enumerate(result.vessels):
                 vessel.processing = self._decision("filter_disabled", eligible=True)
-                enriched = service.enrich_vessel(image, vessel, result.errors)
+                if not details_enabled:
+                    vessel.processing["reason"] = "recognition_disabled"
+                    continue
+                enriched = service.enrich_vessel(image, vessel, result.errors, enable_ship_name=settings.enable_ship_name, enable_draft=settings.enable_draft)
                 enriched.processing = {**vessel.processing, "detail_inferred": True}
                 result.vessels[index] = enriched
             return self._finish(result, started)
@@ -272,10 +280,13 @@ class RealtimeTargetProcessor:
                                            -value[2], value[3]))
         for ordinal, (index, evidence, _, _) in enumerate(candidates):
             vessel = result.vessels[index]
+            if not details_enabled:
+                vessel.processing["reason"] = "recognition_disabled"
+                continue
             if ordinal >= settings.max_detail_targets:
                 vessel.processing["reason"] = "detail_budget"
                 continue
-            enriched = service.enrich_vessel(image, vessel, result.errors)
+            enriched = service.enrich_vessel(image, vessel, result.errors, enable_ship_name=settings.enable_ship_name, enable_draft=settings.enable_draft)
             enriched.processing = {**vessel.processing, "detail_inferred": True}
             result.vessels[index] = enriched
             evidence.last_detail = timestamp

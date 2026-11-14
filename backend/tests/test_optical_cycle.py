@@ -213,6 +213,24 @@ def test_one_transient_absolute_move_failure_is_retried_without_losing_the_cycle
     assert harness.manager.status()["zoom_recovery"]["failure_kind"] is None
 
 
+def test_focus_search_keeps_recording_and_cannot_create_false_departure(cycle_factory, monkeypatch):
+    harness = cycle_factory()
+    harness.warm()
+    rid = harness.start_cycle()
+    before = sum(event[0] == "frame" for event in harness.events)
+    monkeypatch.setattr(optical_module.detail_focus, "busy", lambda: True)
+    for _ in range(3):
+        harness.feed([], advance=2)
+    assert harness.manager.active["id"] == rid
+    assert harness.manager.phase == "zoomed"
+    assert harness.controller.calls == [1, 3]
+    assert sum(event[0] == "frame" for event in harness.events) >= before + 3
+    monkeypatch.setattr(optical_module.detail_focus, "busy", lambda: False)
+    harness.depart()
+    harness.phase("overview")
+    assert harness.manager.catalog[rid]["status"] == "completed"
+
+
 def test_deadline_during_network_retry_retains_transport_recovery_and_ignores_late_ack(cycle_factory, monkeypatch):
     import httpx
     harness = cycle_factory()

@@ -7,6 +7,19 @@ import MetricTile from '../components/MetricTile.vue'
 import RecordingControls from '../components/RecordingControls.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
+import { getFocusStatus, startRegionFocus, stopRegionFocus, type FocusRegion, type FocusStatus } from '../api'
+const focusStatus = ref<FocusStatus | null>(null)
+const focusPicking = ref(false)
+async function focusRegion(region: FocusRegion) {
+  focusPicking.value = false
+  try { focusStatus.value = await startRegionFocus(region); ElMessage.success('已开始选区对焦') }
+  catch (error) { ElMessage.error(apiError(error, '选区对焦失败')) }
+}
+async function stopFocus() {
+  focusPicking.value = false
+  try { focusStatus.value = await stopRegionFocus() }
+  catch (error) { ElMessage.error(apiError(error, '停止对焦失败')) }
+}
 
 interface LiveFrame { frame_timestamp: string; frame_id: number; camera_id: string; source_width: number; source_height: number; processing_ms: number; processing_summary?: ProcessingSummary; vessels: Array<any> }
 const statistics = ref<Statistics>({ generated_at: '', today_traffic: 0, overload_alerts: 0, average_draft: null, average_displacement: null, hourly: [] })
@@ -94,7 +107,8 @@ async function refreshCapture() {
   if (statusRefreshing) return
   statusRefreshing = true
   try {
-    const [cameraResult, recordingResult] = await Promise.allSettled([getCameraStatus(), getRecordingStatus()])
+    const [cameraResult, recordingResult, focusResult] = await Promise.allSettled([getCameraStatus(), getRecordingStatus(), getFocusStatus()])
+    if (focusResult.status === 'fulfilled') focusStatus.value = focusResult.value
     if (cameraResult.status === 'fulfilled') camera.value = cameraResult.value
     if (recordingResult.status === 'fulfilled') recordingStatus.value = recordingResult.value
   } finally { statusRefreshing = false }
@@ -229,8 +243,8 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
           <template v-if="sourceMode === 'local'"><el-button v-if="localActive" size="small" plain type="danger" :loading="sourceBusy" @click="stopLocalVideo"><Square :size="14" />停止回放</el-button><el-button v-else size="small" plain :loading="sourceBusy" @click="videoInput?.click()"><Upload :size="14" />上传视频</el-button><span v-if="sourceBusy && localUploadProgress" class="muted-text">上传 {{ localUploadProgress }}%</span></template>
           <el-button v-else size="small" :type="cameraActive ? 'danger' : 'primary'" :plain="cameraActive" :disabled="!cameraActive && (!camera?.configured || !!savedSettings?.enabled && savedSettings.recording_mode === 'optical_cycle' && !opticalReady)" :loading="sourceBusy" @click="toggleCamera"><Square v-if="cameraActive" :size="14" /><RadioTower v-else :size="14" />{{ cameraActive ? '停止采集' : '启动摄像头采集' }}</el-button>
         </div>
-        <div v-if="sourceError" class="source-error" role="alert">{{ sourceError }}</div>
-        <VideoMonitor v-if="monitorConfigured" :src="monitorSrc" :frame-image="frameImage" :overlay="liveFrame" :camera-id="monitorCameraId" :configured="Boolean(frameImage || monitorSrc)" :loading="sourceMode === 'local' ? localActive && !localFrame : cameraActive && !cameraFrame" :focus-settings="monitorFocusSettings" :recording-status="sourceMode === 'camera' ? recordingStatus : null" :recording="(recordingStatus?.media_recording ?? !!recordingStatus?.active_id) && recordingStatus?.source_name === (sourceMode === 'local' ? localPlayback?.filename : camera?.filename)" @focus-center="setFocusCenter" />
+        <el-button v-if="focusPicking" size="small" @click="focusPicking = false">取消框选</el-button><div v-if="sourceError" class="source-error" role="alert">{{ sourceError }}</div>
+        <VideoMonitor v-if="monitorConfigured" :src="monitorSrc" :frame-image="frameImage" :overlay="liveFrame" :camera-id="monitorCameraId" :configured="Boolean(frameImage || monitorSrc)" :loading="sourceMode === 'local' ? localActive && !localFrame : cameraActive && !cameraFrame" :focus-settings="monitorFocusSettings" :recording-status="sourceMode === 'camera' ? recordingStatus : null" :recording="(recordingStatus?.media_recording ?? !!recordingStatus?.active_id) && recordingStatus?.source_name === (sourceMode === 'local' ? localPlayback?.filename : camera?.filename)" :region-picking="focusPicking" @focus-region="focusRegion" @cancel-region="focusPicking = false" @focus-center="setFocusCenter" />
         <div v-else class="stream-empty">
           <RadioTower :size="36" />
           <strong>{{ sourceMode === 'local' ? '上传一段视频，验证船来即录' : camera?.configured ? '摄像头已配置，等待启动采集' : '等待接入现场摄像头' }}</strong>
@@ -240,7 +254,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
         <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">

@@ -32,6 +32,11 @@ from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
 from .recording import RecordingSettings, recording_manager
 from .target_processing import RealtimeTargetProcessor
+from .camera_profiles import camera_profile_service
+from .camera_setup import CameraSetupError
+from .config import model_config_service
+from .detail_focus import detail_focus
+from .inference.scheduler import inference_scheduler
 from .live_capture import CameraCapture, onvif_control, safe_camera_error, ensure_detection_available, validate_recording_interval
 
 router = APIRouter()
@@ -91,8 +96,36 @@ def streams():
             "protocol": settings.live_stream_protocol if configured else None,
             "play_url": settings.live_stream_url or None,
             "capture_configured": bool(settings.live_capture_url),
+            "profile_token": settings.camera_onvif_profile_token or None,
         }]
     }
+
+
+@router.get("/api/camera/profiles", tags=["system"])
+def camera_profiles():
+    settings = get_effective_settings()
+    try:
+        return camera_profile_service.public(camera_profile_service.discover(settings), settings.camera_onvif_profile_token)
+    except (CameraSetupError, ValueError) as exc:
+        raise HTTPException(502, safe_camera_error(exc, settings)) from exc
+
+
+class CameraProfileRequest(BaseModel):
+    profile_token: str = Field(min_length=1, max_length=200)
+
+
+@router.put("/api/camera/profiles", tags=["system"])
+def select_camera_profile(body: CameraProfileRequest):
+    with _source_lock:
+        if camera_capture.is_alive() or local_playback.is_alive() or recording_manager.optical_control_busy() or detail_focus.busy():
+            raise HTTPException(409, "请先停止采集/回放，等待录像保存及镜头归位后切换视频流")
+        try:
+            result = camera_profile_service.select(model_config_service.effective_settings(), body.profile_token)
+            onvif_control.close()
+            recording_manager.invalidate_zoom_observation()
+            return result
+        except (CameraSetupError, ValueError) as exc:
+            raise HTTPException(422, safe_camera_error(exc, get_effective_settings())) from exc
 
 
 @router.get("/api/dashboard", tags=["system"])
@@ -194,6 +227,18 @@ def download_result(task_id: str, relative_path: str):
     path = ((job_manager.settings.result_root / requested) if requested.parts and requested.parts[0] == task_id else root / requested).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "result file not found")
+    return FileResponse(path)
+
+
+@router.get("/api/jobs/{task_id}/source/{ordinal}", tags=["batch-jobs"])
+def job_source(task_id: str, ordinal: int):
+    job = _job(task_id)
+    if ordinal < 1 or ordinal > len(job["items"]):
+        raise HTTPException(404, "原始文件不存在")
+    root = (job_manager.settings.upload_root / task_id).resolve()
+    path = (root / job["items"][ordinal - 1]["upload_name"]).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(404, "原始文件不存在")
     return FileResponse(path)
 
 
@@ -300,7 +345,8 @@ class _LocalPlayback:
                 if self.models is not None:
                     self.models.release()
                 models = ModelRegistry(settings)
-                models.load()
+                with inference_scheduler.slot(realtime=True):
+                    models.load(realtime=True)
                 self.models = models
             if self.stop_event.is_set():
                 return
@@ -335,16 +381,19 @@ class _LocalPlayback:
                     source_index += 1
                     continue
                 infer_started = time.perf_counter()
-                result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.REGION_DETECTION, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
-                ensure_detection_available(result)
-                validate_recording_interval(step, fps)
-                tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
-                for vessel in result.vessels:
-                    match = Pipeline._best_track(vessel.ship.xyxy, tracks)
-                    if match:
-                        vessel.track_id = int(match.track_id)
-                processor.process(service, result, image, source_timestamp,
-                    RecordingSettings.model_validate(recording_manager.get_settings()))
+                with inference_scheduler.slot(realtime=True):
+                    if self.stop_event.is_set():
+                        break
+                    result = service.infer(image, task_id=str(session_id), source_filename=source_name, task=TaskKind.REGION_DETECTION, observed_at=datetime.now(timezone.utc), frame_index=processed, source_frame_index=source_index)
+                    ensure_detection_available(result)
+                    validate_recording_interval(step, fps)
+                    tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
+                    for vessel in result.vessels:
+                        match = Pipeline._best_track(vessel.ship.xyxy, tracks)
+                        if match:
+                            vessel.track_id = int(match.track_id)
+                    processor.process(service, result, image, source_timestamp,
+                        RecordingSettings.model_validate(recording_manager.get_settings()))
                 result.processing_ms = (time.perf_counter() - infer_started) * 1000
                 current = {}
                 active_ids = set()
@@ -434,7 +483,7 @@ class CameraStartRequest(BaseModel):
 
 
 class PtzRequest(BaseModel):
-    action: Literal["zoom_in", "zoom_out", "focus_near", "focus_far", "autofocus", "stop", "home"]
+    action: Literal["zoom_in", "zoom_out", "focus_near", "focus_far", "autofocus", "stop", "home", "pan_left", "pan_right", "tilt_up", "tilt_down", "save_view", "restore_view"]
 
 
 @router.get("/api/realtime/camera", tags=["realtime"])
@@ -471,18 +520,52 @@ def camera_ptz_status():
 @router.post("/api/camera/ptz", tags=["realtime"])
 def control_camera(body: PtzRequest):
     try:
+        if body.action == "stop":
+            detail_focus.stop()
+        elif detail_focus.busy():
+            raise ValueError("请等待区域对焦结束或先停止对焦")
         if recording_manager.optical_control_busy():
             if body.action != "stop":
                 raise ValueError("光学循环录制正在控制镜头，请先关闭录制或停止采集后再手动操作")
             onvif_control.cancel_move()
             recording_manager.fail("操作员停止镜头动作，光学录制循环已暂停")
-        if body.action in {"zoom_in", "zoom_out", "home", "stop"}:
+        if body.action in {"zoom_in", "zoom_out", "home", "stop", "pan_left", "pan_right", "tilt_up", "tilt_down", "restore_view"}:
             recording_manager.invalidate_zoom_observation()
         return onvif_control.command(body.action)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, safe_camera_error(exc, get_effective_settings())) from exc
+
+
+class FocusRegionRequest(BaseModel):
+    left: float = Field(ge=0, le=1, allow_inf_nan=False)
+    top: float = Field(ge=0, le=1, allow_inf_nan=False)
+    right: float = Field(ge=0, le=1, allow_inf_nan=False)
+    bottom: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
+@router.get("/api/camera/focus", tags=["realtime"])
+def focus_status():
+    return detail_focus.snapshot()
+
+
+@router.post("/api/camera/focus", status_code=202, tags=["realtime"])
+def focus_region(body: FocusRegionRequest):
+    if body.left >= body.right or body.top >= body.bottom:
+        raise HTTPException(422, "聚焦区域左上角必须小于右下角")
+    try:
+        if not camera_capture.is_alive() or recording_manager.optical_control_busy():
+            raise ValueError("手动选区对焦需要启动摄像头采集并暂停自动光学循环")
+        return detail_focus.start(onvif_control, (body.left, body.top, body.right, body.bottom))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/api/camera/focus/stop", tags=["realtime"])
+def stop_focus():
+    detail_focus.stop()
+    return detail_focus.snapshot()
 
 
 @router.get("/api/realtime/local-video", tags=["realtime"])

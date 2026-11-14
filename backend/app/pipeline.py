@@ -14,6 +14,7 @@ from .inference.frame_inference import FrameInferenceService
 from .database import ResultRepository
 from .storage import ResultStorage
 from .tracking import InstanceAggregator
+from .inference.scheduler import inference_scheduler
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".flv", ".ts"}
@@ -27,13 +28,15 @@ class VideoSample:
     frame: np.ndarray
 
 
-def sample_video(path: Path, frame_step: int = 1, max_frames: int | None = None):
+def sample_video(path: Path, frame_step: int = 1, max_frames: int | None = None, *, start_time: datetime | None = None):
     """Stream video frames; never load a video or its JSONL into memory."""
     if frame_step < 1 or (max_frames is not None and max_frames < 1): raise ValueError("frame_step and max_frames must be positive")
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened(): raise ValueError(f"unable to read video: {path}")
     fps, source_index, frame_index = float(capture.get(cv2.CAP_PROP_FPS) or 25.0), -1, 0
-    base_time = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    if not np.isfinite(fps) or not 1 <= fps <= 240:
+        fps = 25.
+    base_time = start_time or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     try:
         while True:
             ok, frame = capture.read()
@@ -55,13 +58,13 @@ class Pipeline:
         self.tracker_factory = tracker_factory
         self.tracking_options = tracking_options or {}
 
-    def process_file(self, source: Path, *, ordinal: int, task: TaskKind, enable_tracking: bool, source_filename: str | None = None, frame_step: int = 1, max_frames: int | None = None, visualize: bool = False, progress: Callable[[int, str], None] | None = None, cancelled: Callable[[], bool] | None = None) -> dict:
+    def process_file(self, source: Path, *, ordinal: int, task: TaskKind, enable_tracking: bool, source_filename: str | None = None, frame_step: int = 1, max_frames: int | None = None, visualize: bool = False, progress: Callable[[int, str], None] | None = None, cancelled: Callable[[], bool] | None = None, observed_start: datetime | None = None) -> dict:
         source_filename = source_filename or source.name
         suffix = source.suffix.lower()
         if suffix in IMAGE_EXTENSIONS:
             return self._image(source, source_filename, ordinal, task, visualize, progress, cancelled)
         if suffix in VIDEO_EXTENSIONS:
-            return self._video(source, source_filename, ordinal, task, enable_tracking, frame_step, max_frames, visualize, progress, cancelled)
+            return self._video(source, source_filename, ordinal, task, enable_tracking, frame_step, max_frames, visualize, progress, cancelled, observed_start)
         raise ValueError(f"unsupported media type: {source.name}")
 
     def _image(self, source: Path, source_filename: str, ordinal: int, task: TaskKind, visualize: bool, progress, cancelled) -> dict:
@@ -69,7 +72,10 @@ class Pipeline:
         frame = cv2.imread(str(source))
         if frame is None:
             raise ValueError(f"unable to read image: {source.name}")
-        result = self.frame_inference.infer(frame, task_id=self.storage.task_id, source_filename=source_filename, task=task, observed_at=datetime.now(timezone.utc))
+        with inference_scheduler.slot(cancelled=cancelled):
+            result = self.frame_inference.infer(frame, task_id=self.storage.task_id, source_filename=source_filename, task=task, observed_at=datetime.now(timezone.utc))
+        if result.errors:
+            raise RuntimeError("; ".join(result.errors))
         stem = self.storage.source_stem(ordinal, source_filename)
         label_uri = None
         if task is not TaskKind.SHIP_NAME_RECOGNITION:
@@ -82,7 +88,7 @@ class Pipeline:
         self._notify(progress, 1, "image completed")
         return {"filename": source_filename, "mode": "image", "status": "completed", "processed_samples": 1, "csv_rows": self._image_rows(result, task), "result_uri": label_uri, "visual_uri": visual_uri}
 
-    def _video(self, source: Path, source_filename: str, ordinal: int, task: TaskKind, enable_tracking: bool, frame_step: int, max_frames: int | None, visualize: bool, progress, cancelled) -> dict:
+    def _video(self, source: Path, source_filename: str, ordinal: int, task: TaskKind, enable_tracking: bool, frame_step: int, max_frames: int | None, visualize: bool, progress, cancelled, observed_start=None) -> dict:
         stem = self.storage.source_stem(ordinal, source_filename)
         tracker = self.tracker_factory() if enable_tracking and self.tracker_factory else None
         aggregator = InstanceAggregator(self.storage.task_id, source_filename, **self.tracking_options) if enable_tracking else None
@@ -91,10 +97,22 @@ class Pipeline:
         jsonl_uri: str | None = None
         last_time = datetime.now(timezone.utc)
         writer = None
+        source_fps = 25.
+        if visualize:
+            probe = cv2.VideoCapture(str(source))
+            try:
+                reported = float(probe.get(cv2.CAP_PROP_FPS))
+                if np.isfinite(reported) and 1 <= reported <= 240:
+                    source_fps = reported
+            finally:
+                probe.release()
         try:
-            for sample in sample_video(source, frame_step, max_frames):
+            for sample in sample_video(source, frame_step, max_frames, start_time=observed_start):
                 self._check_cancelled(cancelled)
-                result = self.frame_inference.infer(sample.frame, task_id=self.storage.task_id, source_filename=source_filename, task=task, observed_at=sample.observed_at, frame_index=sample.frame_index, source_frame_index=sample.source_frame_index)
+                with inference_scheduler.slot(cancelled=cancelled):
+                    result = self.frame_inference.infer(sample.frame, task_id=self.storage.task_id, source_filename=source_filename, task=task, observed_at=sample.observed_at, frame_index=sample.frame_index, source_frame_index=sample.source_frame_index)
+                if result.errors:
+                    raise RuntimeError("; ".join(result.errors))
                 last_time = sample.observed_at
                 active_ids: set[int] = set()
                 if tracker is not None:
@@ -109,13 +127,16 @@ class Pipeline:
                             active_ids.add(vessel.track_id)
                             aggregator.update(vessel.track_id, vessel, sample.observed_at)
                     for instance in aggregator.sweep(active_ids, sample.observed_at):
-                        self.storage.append_video_record(stem, instance)
+                        instance_path = self.storage.append_video_record(stem, instance)
+                        rows.append(self._instance_row(instance))
+                        if task is TaskKind.FULL_PIPELINE and self.repository:
+                            self.repository.save_video_instance(instance, self.storage.relative_uri(instance_path))
                 jsonl_uri = self.storage.relative_uri(self.storage.append_video_record(stem, result))
                 if visualize:
                     canvas = self._visualize(sample.frame, result)
                     if writer is None:
                         height, width = canvas.shape[:2]
-                        writer = cv2.VideoWriter(str(self.storage.video_visualization_path(stem)), cv2.VideoWriter_fourcc(*"mp4v"), 25.0 / frame_step, (width, height))
+                        writer = cv2.VideoWriter(str(self.storage.video_visualization_path(stem)), cv2.VideoWriter_fourcc(*"mp4v"), source_fps / frame_step, (width, height))
                         if not writer.isOpened(): raise RuntimeError("unable to create annotated video")
                     writer.write(canvas)
                 if not enable_tracking:
@@ -126,16 +147,22 @@ class Pipeline:
                 self._notify(progress, processed, f"processed video frame {sample.source_frame_index}")
         finally:
             if writer is not None: writer.release()
+        if not processed:
+            raise ValueError("视频没有可解码的画面")
         if aggregator is not None:
             for instance in aggregator.finish_all(last_time):
                 self.storage.append_video_record(stem, instance)
-                rows.append({"instance_id": instance.instance_id, "recognized_zh": instance.recognized_zh, "recognized_en": instance.recognized_en, "draft_depth_m": instance.draft_depth_m, "start_time": instance.start_time.isoformat(), "end_time": instance.end_time.isoformat(), "status": instance.status.value})
+                rows.append(self._instance_row(instance))
                 if task is TaskKind.FULL_PIPELINE and self.repository and jsonl_uri:
                     self.repository.save_video_instance(instance, jsonl_uri)
         if visualize and self.storage.video_visualization_path(stem).is_file():
             self.storage.make_video_visualization_web_playable(stem)
         visual_uri = self.storage.relative_uri(self.storage.video_visualization_path(stem)) if visualize and self.storage.video_visualization_path(stem).is_file() else None
         return {"filename": source_filename, "mode": "video", "status": "completed", "processed_samples": processed, "csv_rows": rows, "result_uri": jsonl_uri, "visual_uri": visual_uri, "enable_tracking": enable_tracking}
+
+    @staticmethod
+    def _instance_row(instance):
+        return {"instance_id": instance.instance_id, "recognized_zh": instance.recognized_zh, "recognized_en": instance.recognized_en, "draft_depth_m": instance.draft_depth_m, "start_time": instance.start_time.isoformat(), "end_time": instance.end_time.isoformat(), "status": instance.status.value}
 
     @staticmethod
     def _image_rows(result: FrameResultV2, task: TaskKind) -> list[dict]:

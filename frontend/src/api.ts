@@ -39,7 +39,10 @@ export interface Statistics {
 
 export interface ModelSlot { name: string; status: string; config: string | null; weights: string | null }
 export interface Health { status: string; realtime_status: string; environment: string; demo_mode: boolean; device: string; models: ModelSlot[]; dependencies: { database: string; redis: 'ready' | 'optional' | 'unavailable' } }
-export interface StreamItem { id: string; name: string; status: 'configured' | 'unconfigured'; protocol: string | null; play_url: string | null }
+export interface StreamItem { id: string; name: string; status: 'configured' | 'unconfigured'; protocol: string | null; play_url: string | null; profile_token?: string; capture_configured?: boolean }
+export interface CameraProfiles { selected_profile: string; profiles: Array<{ token: string; name: string; width: number; height: number; encoding: string; frame_rate_limit: number | null; ptz: boolean }>; device: { manufacturer: string; model: string }; warnings: string[] }
+export function getCameraProfiles() { return api.get<CameraProfiles>('/camera/profiles', { timeout: 60000 }).then(({ data }) => data) }
+export function selectCameraProfile(profile_token: string) { return api.put<CameraProfiles>('/camera/profiles', { profile_token }, { timeout: 60000 }).then(({ data }) => data) }
 export interface LocalPlaybackStatus { status: 'idle' | 'starting' | 'running' | 'completed' | 'stopped' | 'failed'; session_id: string | null; filename: string | null; camera_id?: string; frame_id: number; total_frames: number; frame_step?: number; error: string | null }
 export type OfflineTask = 'region_detection' | 'ship_name_recognition' | 'draft_estimation' | 'full_pipeline'
 export type OfflineJobStatus = 'uploading' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -88,6 +91,8 @@ export interface OfflineJob {
     visualize: boolean
   }
   items: OfflineJobItem[]
+  source_recording?: { id: string; camera_id: string; source_name: string; started_at: string; original_url: string } | null
+  summary?: { ship_names: string[]; draft_depths_m: number[]; instances: Array<{ instance_id: number; recognized_zh: string; draft_depth_m: number | null; status: string }> }
 }
 export interface DashboardData { statistics: Statistics; records: RecordItem[] }
 export interface RealtimeResultItem {
@@ -106,6 +111,9 @@ export interface ModelSettings {
 }
 
 export interface RecordingSettings {
+  enable_ship_name: boolean
+  enable_draft: boolean
+  auto_region_focus: boolean
   target_filter_enabled: boolean
   min_target_height_ratio: number
   min_target_width_ratio: number
@@ -148,6 +156,7 @@ export interface RecordingSettings {
   target_acquire_timeout_seconds: number
 }
 export const defaultRecordingSettings = (): RecordingSettings => ({
+  enable_ship_name: true, enable_draft: true, auto_region_focus: false,
   target_filter_enabled: true, min_target_height_ratio: .06, min_target_width_ratio: .12,
   target_confirm_hits: 3, target_confirm_seconds: .4,
   target_roi_left: 0, target_roi_top: 0, target_roi_right: 1, target_roi_bottom: 1,
@@ -198,6 +207,7 @@ export interface AdaptiveSelection {
 export const targetMotionLabel = (state?: string) => ({ observing: '观测中', moving: '移动船舶', stationary: '停泊已排除' }[state || ''] || '待观测')
 const baseSelectionReasonLabel = (reason?: string) => ({ nearest_moving: '优先选择船框较高的移动目标', nearest: '按船框高度估计近船优先', observing_motion: '正在观察并确认船舶自身位移', stationary_excluded: '持续静止，已排除录制焦点', keep_target_hysteresis: '保留当前候选，避免相近目标来回切换', no_moving_target: '暂无已确认移动的目标，继续观察', adaptive_calibrated: '按船高选择安全的已标定光学档位', fixed_zoom: '采用已设置的固定光学倍率', already_large_enough: '船体已足够大，保留 1× 避免裁掉船体', no_safe_calibrated_zoom: '暂无安全的已标定放大档位，保留全景', off_axis_limited: '受目标竖直位置与视野边界限制，降低放大倍率', uncertain_background: '背景运动补偿尚不明确，暂缓停泊判定', no_eligible_target: '暂无可录制的移动目标', observing: '正在观察位移，暂不抢占录制', stationary: '持续静止，暂不作为录制焦点', no_calibrated_zoom: '设置范围内没有可用的已标定倍率', calibrated_limit: '已按可用标定档位限制倍率', target_locked: '本轮已锁定目标，不随其他船切换', motion_confirming: '正在确认船舶移动', no_vessels: '当前未检测到船体' }[reason || ''] || reason || '等待新的目标观测')
 const additionalSelectionReasons: Record<string, string> = {
+  recognition_disabled: '详细识别已关闭，仅检测、跟踪与录像',
   ambiguous_identity: '多船重叠，身份关联不明确，继续观察',
   small_target: '画面尺寸不足，仅检测与跟踪',
   low_confidence: '检测置信度不足，仅检测与跟踪',
@@ -238,6 +248,9 @@ export interface RecordingStatus {
   focus: { x: number; y: number; width: number; height: number } | null
 }
 export interface RecordingItem {
+  focus_events?: Array<{ time: string; status: string; error: string | null; result?: { sharpness_before: number; sharpness_best: number } | null }>
+  analysis?: Pick<OfflineJob, 'id' | 'status' | 'progress' | 'error' | 'created_at' | 'completed_at' | 'items' | 'options'>
+  analysis_result?: { job_id: string; completed_at: string; ship_names: string[]; draft_depths_m: number[]; instances: Array<{ instance_id: number; recognized_zh: string; draft_depth_m: number | null; status: string }> }
   id: string
   camera_id: string
   source_name: string
@@ -285,11 +298,17 @@ export interface CameraStatus {
   retry_delay_seconds?: number | null
 }
 export interface PtzStatus {
+  pan_tilt_supported?: boolean; absolute_pan_tilt_supported?: boolean; region_focus_supported?: boolean; region_focus_error?: string
   configured: boolean; supported: boolean; focus_supported?: boolean; autofocus_supported?: boolean; focus_error?: string | null; error: string | null
   absolute_zoom_supported?: boolean; calibrated?: boolean; magnifications?: number[]
   cycle_supported?: boolean; zoom_error?: string | null
 }
-export type PtzAction = 'zoom_in' | 'zoom_out' | 'focus_near' | 'focus_far' | 'autofocus' | 'stop' | 'home'
+export type PtzAction = 'zoom_in' | 'zoom_out' | 'focus_near' | 'focus_far' | 'autofocus' | 'stop' | 'home' | 'pan_left' | 'pan_right' | 'tilt_up' | 'tilt_down' | 'save_view' | 'restore_view'
+export interface FocusRegion { left: number; top: number; right: number; bottom: number }
+export interface FocusStatus { status: 'idle' | 'focusing' | 'completed' | 'failed' | 'cancelled'; error: string | null; automatic?: boolean; result?: { sharpness_before: number; sharpness_best: number } | null }
+export function getFocusStatus() { return api.get<FocusStatus>('/camera/focus').then(({ data }) => data) }
+export function startRegionFocus(region: FocusRegion) { return api.post<FocusStatus>('/camera/focus', region).then(({ data }) => data) }
+export function stopRegionFocus() { return api.post<FocusStatus>('/camera/focus/stop').then(({ data }) => data) }
 
 export function getRecordingSettings() { return api.get<RecordingSettings>('/recording/settings').then(({ data }) => data) }
 export function updateRecordingSettings(settings: RecordingSettings) { return api.put<RecordingSettings>('/recording/settings', settings).then(({ data }) => data) }
@@ -298,11 +317,13 @@ export function getRecordings(params: Record<string, unknown> = {}) {
   return api.get<{ items: RecordingItem[]; total: number; page: number; page_size: number }>('/recordings', { params }).then(({ data }) => data)
 }
 export function deleteRecording(id: string) { return api.delete(`/recordings/${encodeURIComponent(id)}`) }
+export function getRecording(id: string) { return api.get<RecordingItem>(`/recordings/${encodeURIComponent(id)}`).then(({ data }) => data) }
+export function analyzeRecording(id: string, options = { frame_step: 1, visualize: true }) { return api.post<OfflineJob>(`/recordings/${encodeURIComponent(id)}/analyze`, options, { timeout: 0 }).then(({ data }) => data) }
 export function getCameraStatus() { return api.get<CameraStatus>('/realtime/camera').then(({ data }) => data) }
 export function startCamera(frameStep = 3) { return api.post<CameraStatus>('/realtime/camera/start', { frame_step: frameStep }, { timeout: 0 }).then(({ data }) => data) }
 export function stopCamera() { return api.post<CameraStatus>('/realtime/camera/stop').then(({ data }) => data) }
-export function getPtzStatus() { return api.get<PtzStatus>('/camera/ptz', { timeout: 30000 }).then(({ data }) => data) }
-export function controlPtz(action: PtzAction) { return api.post('/camera/ptz', { action }).then(({ data }) => data) }
+export function getPtzStatus() { return api.get<PtzStatus>('/camera/ptz', { timeout: 60000 }).then(({ data }) => data) }
+export function controlPtz(action: PtzAction) { return api.post('/camera/ptz', { action }, { timeout: 60000 }).then(({ data }) => data) }
 
 export function formatBytes(bytes: number) {
   if (!bytes) return '0 MB'

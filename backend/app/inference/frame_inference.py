@@ -131,11 +131,11 @@ class FrameInferenceService:
                 output.append(region)
         return output
 
-    def _full_vessel(self, vessel_id: int, frame: np.ndarray, ship: Detection, regions: list[Detection], errors: list[str]) -> VesselFrameResult:
+    def _full_vessel(self, vessel_id: int, frame: np.ndarray, ship: Detection, regions: list[Detection], errors: list[str], *, enable_ship_name: bool = True, enable_draft: bool = True) -> VesselFrameResult:
         name_region = next((item for item in regions if item.label == "ship_name_area"), None)
         draft_region = next((item for item in regions if item.label == "waterline_area"), None)
-        name, name_observation = self._recognize_name(frame, name_region, errors)
-        draft_marks, water, draft = self._estimate_draft(frame, draft_region, errors)
+        name, name_observation = self._recognize_name(frame, name_region, errors) if enable_ship_name else ("", None)
+        draft_marks, water, draft = self._estimate_draft(frame, draft_region, errors) if enable_draft else ([], [], DraftObservation())
         zh, en = recognized_name_fields(name)
         return VesselFrameResult(
             vessel_id=vessel_id,
@@ -149,9 +149,9 @@ class FrameInferenceService:
             draft=draft,
         )
 
-    def enrich_vessel(self, frame: np.ndarray, vessel: VesselFrameResult, errors: list[str]) -> VesselFrameResult:
+    def enrich_vessel(self, frame: np.ndarray, vessel: VesselFrameResult, errors: list[str], *, enable_ship_name: bool = True, enable_draft: bool = True) -> VesselFrameResult:
         """Run expensive ROI models only after realtime tracking and admission."""
-        enriched = self._full_vessel(vessel.vessel_id, frame, vessel.ship, vessel.regions, errors)
+        enriched = self._full_vessel(vessel.vessel_id, frame, vessel.ship, vessel.regions, errors, enable_ship_name=enable_ship_name, enable_draft=enable_draft)
         enriched.track_id = vessel.track_id
         enriched.processing = dict(vessel.processing)
         return enriched
@@ -173,6 +173,8 @@ class FrameInferenceService:
         if region is None:
             return "", None
         try:
+            if hasattr(self.models, "ensure_details"):
+                self.models.ensure_details(enable_ship_name=True, enable_draft=False)
             crop = self._crop(frame, region.xyxy)
             values = self.models.name_recognizer(img_numpy=Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)), batch_num=1)
             value = values[0] if values else {}
@@ -187,6 +189,8 @@ class FrameInferenceService:
         if region is None:
             return [], [], DraftObservation()
         try:
+            if hasattr(self.models, "ensure_details"):
+                self.models.ensure_details(enable_ship_name=False, enable_draft=True)
             crop = self._crop(frame, region.xyxy)
             prediction = self.models.draft_predictor.predict(crop)
             items = list(prediction.detection.boxes)

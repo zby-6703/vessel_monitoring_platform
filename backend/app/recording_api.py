@@ -4,9 +4,11 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from .recording import RecordingSettings, recording_manager
 from .monitoring_audit import recent_events
+from .jobs import job_manager
 
 router = APIRouter(tags=["passage recordings"])
 
@@ -53,6 +55,30 @@ def delete_recording(recording_id: str):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"deleted": True}
+
+
+class RecordingAnalysisRequest(BaseModel):
+    frame_step: int = Field(default=1, ge=1, le=1000)
+    visualize: bool = True
+
+
+@router.post("/api/recordings/{recording_id}/analyze", status_code=202)
+def analyze_recording(recording_id: str, payload: RecordingAnalysisRequest | None = None):
+    try:
+        return job_manager.create_from_recording(recording_manager, recording_id, (payload or RecordingAnalysisRequest()).model_dump())
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "录像不存在或尚未完成转码") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/api/recordings/{recording_id}")
+def get_recording(recording_id: str):
+    with recording_manager.lock:
+        item = recording_manager.catalog.get(recording_id)
+        if item is None:
+            raise HTTPException(404, "录像不存在")
+        return recording_manager._public_item(item)
 
 
 @router.get("/api/recordings/{recording_id}/{kind}")

@@ -3,11 +3,31 @@ import mpegts from 'mpegts.js'
 import { Crosshair, Maximize, Pause, Play, ScanLine, ZoomIn } from 'lucide-vue-next'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { cyclePhaseLabel, selectionReasonLabel, type ProcessingSummary, type RecordingSettings, type RecordingStatus, type TargetProcessing } from '../api'
+import type { FocusRegion } from '../api'
 
 interface OverlayBox { type: string; xywh: [number, number, number, number]; confidence: number; class_name?: string }
 interface OverlayFrame { source_width: number; source_height: number; processing_ms: number; processing_summary?: ProcessingSummary; vessels: Array<{ ship_id: number; confidence: number; boxes: OverlayBox[]; processing?: TargetProcessing }> }
-const props = defineProps<{ src?: string; frameImage?: string | null; overlay?: OverlayFrame | null; cameraId: string; configured: boolean; loading?: boolean; focusSettings?: RecordingSettings; recording?: boolean; recordingStatus?: RecordingStatus | null }>()
-const emit = defineEmits<{ 'focus-center': [value: { x: number; y: number }] }>()
+const props = defineProps<{ src?: string; frameImage?: string | null; overlay?: OverlayFrame | null; cameraId: string; configured: boolean; loading?: boolean; focusSettings?: RecordingSettings; recording?: boolean; recordingStatus?: RecordingStatus | null; regionPicking?: boolean }>()
+const emit = defineEmits<{ 'focus-center': [value: { x: number; y: number }]; 'focus-region': [value: FocusRegion]; 'cancel-region': [] }>()
+const regionStart = ref<{ x: number; y: number } | null>(null)
+const regionEnd = ref<{ x: number; y: number } | null>(null)
+function regionPoint(event: PointerEvent) {
+  const bounds = root.value!.getBoundingClientRect()
+  return { x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1), y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1) }
+}
+function beginRegion(event: PointerEvent) {
+  regionStart.value = regionEnd.value = regionPoint(event)
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+}
+const drawnRegion = computed(() => {
+  const a = regionStart.value, b = regionEnd.value
+  return a && b ? { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y), right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) } : null
+})
+function endRegion() {
+  const region = drawnRegion.value
+  if (region && region.right - region.left >= .02 && region.bottom - region.top >= .02) emit('focus-region', region)
+  regionStart.value = regionEnd.value = null
+}
 const root = ref<HTMLDivElement>()
 const video = ref<HTMLVideoElement>()
 const playing = ref(false)
@@ -96,6 +116,10 @@ onBeforeUnmount(() => { player?.destroy() })
     </div>
     <div v-if="(!src && !frameImage) || mediaError" class="monitor-loading" role="status" aria-live="polite"><ScanLine :size="28" /><strong>{{ mediaError ? '画面暂不可播放' : loading ? '正在连接并初始化模型' : '等待监测画面' }}</strong><span>{{ mediaError ? '启动摄像头采集可显示实时推理帧，请同时检查流地址' : '收到真实视频帧后显示检测与聚焦范围' }}</span></div>
     <div class="video-vignette"></div>
+    <div v-if="regionPicking" class="focus-region-picker" tabindex="0" role="group" aria-label="拖动选择聚焦区域，Esc 取消" @pointerdown.stop.prevent="beginRegion" @pointermove.stop="regionStart && (regionEnd = regionPoint($event))" @pointerup.stop="endRegion" @pointercancel="regionStart = regionEnd = null" @click.stop @keydown.esc="emit('cancel-region')">
+      <span>拖动框选船名或吃水刻度区域 · Esc 取消</span>
+      <div v-if="drawnRegion" class="focus-region-outline" :style="{ left: `${drawnRegion.left * 100}%`, top: `${drawnRegion.top * 100}%`, width: `${(drawnRegion.right - drawnRegion.left) * 100}%`, height: `${(drawnRegion.bottom - drawnRegion.top) * 100}%` }"></div>
+    </div>
     <div class="camera-badge"><span class="status-dot" :class="configured ? 'online' : 'offline'"></span>{{ cameraId }}<b v-if="recording" class="recording-live-indicator">● REC</b></div>
     <div v-if="overlay" class="inference-badge"><ScanLine :size="14" /> {{ inferenceFps?.toFixed(1) }} FPS <span>{{ overlay.processing_ms.toFixed(1) }} ms</span></div>
     <div v-if="optical" class="optical-monitor-state" role="status"><ZoomIn :size="13" /><strong>{{ recordingStatus?.current_zoom_factor == null ? '镜头倍率待确认' : `光学 ${recordingStatus.current_zoom_factor}×` }}</strong><span>{{ recordingStatus?.state === 'disabled' ? '循环未开启' : cyclePhaseLabel(recordingStatus?.phase, recordingStatus?.awaiting_zoomed_target) }}</span></div>
@@ -113,3 +137,9 @@ onBeforeUnmount(() => { player?.destroy() })
     </div>
   </div>
 </template>
+
+<style scoped>
+.focus-region-picker { position: absolute; inset: 0; z-index: 15; cursor: crosshair; touch-action: none; outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
+.focus-region-picker > span { position: absolute; top: 44px; left: 12px; color: white; background: #101a22dd; padding: 7px 10px; font-size: 12px; }
+.focus-region-outline { position: absolute; border: 2px solid #56dfb0; background: #56dfb020; pointer-events: none; }
+</style>

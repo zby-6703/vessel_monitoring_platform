@@ -3,6 +3,10 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ChevronLeft, ChevronRight, Download, Play, UploadCloud } from 'lucide-vue-next'
 import { cancelOfflineJob, createOfflineJob, getOfflineJob, getOfflineJobs, type OfflineJob } from '../api'
+import { useRoute, useRouter } from 'vue-router'
+const route = useRoute()
+const router = useRouter()
+const refreshError = ref('')
 
 const files = ref<File[]>([])
 const previewFiles = ref<File[]>([])
@@ -10,7 +14,7 @@ const previewIndex = ref(0)
 const jobs = ref<OfflineJob[]>([])
 const selected = ref<OfflineJob | null>(null)
 const submitting = ref(false)
-const form = reactive({ task: 'full_pipeline', enableTracking: false, frameStep: 1, maxFrames: undefined as number | undefined, visualize: true })
+const form = reactive({ task: 'full_pipeline', enableTracking: false, frameStep: 1, limitFrames: false, maxFrames: 300, visualize: true })
 const taskOptions = [
   { value: 'full_pipeline', label: '完整流水线' },
   { value: 'region_detection', label: '区域检测' },
@@ -22,7 +26,9 @@ const active = computed(() => selected.value && ['queued', 'running'].includes(s
 const resultUrl = computed(() => selected.value ? `/api/jobs/${selected.value.id}/files/result.csv` : '')
 const previewFile = computed(() => previewFiles.value[previewIndex.value] || null)
 const previewItem = computed(() => selected.value?.items[previewIndex.value] || null)
-const originalSource = ref('')
+const localOriginalSource = ref('')
+const originalSource = computed(() => selected.value ? `/api/jobs/${selected.value.id}/source/${previewIndex.value + 1}` : localOriginalSource.value)
+const previewCount = computed(() => selected.value?.items.length || previewFiles.value.length)
 const resultSource = computed(() => selected.value?.status === 'completed' && previewItem.value?.visual_uri ? `/api/jobs/${selected.value.id}/files/${previewItem.value.visual_uri}` : '')
 const previewVideo = computed(() => /\.(mp4|avi|mov|mkv|m4v|wmv|flv|ts)$/i.test(previewItem.value?.filename || previewFile.value?.name || ''))
 const statusLabel = computed(() => jobStatusLabels[selected.value?.status || ''] || '未开始')
@@ -31,17 +37,25 @@ let originalObjectUrl = ''
 watch(previewFile, (file) => {
   if (originalObjectUrl) URL.revokeObjectURL(originalObjectUrl)
   originalObjectUrl = file ? URL.createObjectURL(file) : ''
-  originalSource.value = originalObjectUrl
+  localOriginalSource.value = originalObjectUrl
 }, { immediate: true })
 
 function selectFiles(event: Event) {
+  selected.value = null
   files.value = Array.from((event.target as HTMLInputElement).files || [])
   previewFiles.value = [...files.value]
   previewIndex.value = 0
 }
+let refreshing = false
 async function refresh() {
-  jobs.value = await getOfflineJobs()
-  if (selected.value) selected.value = await getOfflineJob(selected.value.id)
+  if (refreshing) return
+  refreshing = true
+  try {
+    jobs.value = await getOfflineJobs()
+    if (selected.value) selected.value = await getOfflineJob(selected.value.id)
+    refreshError.value = ''
+  } catch { refreshError.value = '任务状态刷新失败，请检查后端连接。' }
+  finally { refreshing = false }
 }
 async function submit() {
   if (!files.value.length) return ElMessage.warning('请选择一个或多个图片/视频文件')
@@ -51,10 +65,12 @@ async function submit() {
   body.append('enable_tracking', String(form.enableTracking))
   body.append('frame_step', String(form.frameStep))
   body.append('visualize', String(form.visualize))
-  if (form.maxFrames) body.append('max_frames', String(form.maxFrames))
+  if (form.limitFrames && form.maxFrames) body.append('max_frames', String(form.maxFrames))
   submitting.value = true
   try {
     selected.value = await createOfflineJob(body)
+    previewIndex.value = 0
+    await router.replace({ query: { job: selected.value.id } })
     await refresh()
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '任务创建失败')
@@ -62,11 +78,25 @@ async function submit() {
     submitting.value = false
   }
 }
-async function cancel() { if (selected.value) selected.value = await cancelOfflineJob(selected.value.id) }
-async function selectJob(row: OfflineJob) { selected.value = await getOfflineJob(row.id) }
+async function cancel() {
+  try { if (selected.value) selected.value = await cancelOfflineJob(selected.value.id) }
+  catch { ElMessage.error('取消失败，请重试') }
+}
+async function selectJob(row: OfflineJob) {
+  try { selected.value = await getOfflineJob(row.id); previewIndex.value = 0; await router.replace({ query: { job: row.id } }) }
+  catch { ElMessage.error('任务读取失败') }
+}
 let timer: number | undefined
-onMounted(() => { refresh(); timer = window.setInterval(refresh, 1500) })
+let disposed = false
+async function selectRouteJob() {
+  if (typeof route.query.job !== 'string' || route.query.job === selected.value?.id) return
+  try { selected.value = await getOfflineJob(route.query.job); previewIndex.value = 0 }
+  catch { ElMessage.error('关联作业不存在') }
+}
+watch(() => route.query.job, selectRouteJob)
+onMounted(async () => { await selectRouteJob(); await refresh(); if (!disposed) timer = window.setInterval(refresh, 1500) })
 onBeforeUnmount(() => {
+  disposed = true
   if (timer) clearInterval(timer)
   if (originalObjectUrl) URL.revokeObjectURL(originalObjectUrl)
 })
@@ -100,13 +130,13 @@ onBeforeUnmount(() => {
           <div class="option-grid">
             <el-form-item label="视频跟踪" class="switch-field"><el-switch v-model="form.enableTracking" /><span>聚合同一船舶的历史预测</span></el-form-item>
             <el-form-item label="采样间隔"><el-input-number v-model="form.frameStep" :min="1" :max="1000" aria-label="视频采样间隔" /></el-form-item>
-            <el-form-item label="最大处理帧"><el-input-number v-model="form.maxFrames" :min="1" placeholder="不限制" aria-label="最大处理帧" /></el-form-item>
+            <el-form-item label="最大处理帧"><el-switch v-model="form.limitFrames" aria-label="限制离线处理帧数" /><el-input-number v-if="form.limitFrames" v-model="form.maxFrames" :min="1" aria-label="最大处理帧" /><span v-else>不限制</span></el-form-item>
             <el-form-item label="生成可视化" class="switch-field"><el-switch v-model="form.visualize" /><span>输出 JPG 或浏览器可播放的视频</span></el-form-item>
           </div>
         </fieldset>
 
         <div class="submit-row">
-          <p>任务将按顺序使用 GPU；创建后仍可直接复用当前文件。</p>
+          <p>离线任务按顺序执行；帧与帧之间优先让出推理资源给实时监测。</p>
           <el-button type="primary" :loading="submitting" :disabled="!files.length" @click="submit"><Play :size="16" />创建任务</el-button>
         </div>
       </el-form>
@@ -117,20 +147,20 @@ onBeforeUnmount(() => {
         <div><span class="section-kicker">任务结果</span><h2>{{ selected?.id || '尚未选择任务' }}</h2></div>
         <div class="result-actions"><span v-if="selected" class="status-chip" :class="selected.status">{{ statusLabel }} · {{ selected.progress }}%</span><a v-if="selected?.status === 'completed'" :href="resultUrl"><Download :size="16" />下载精简 CSV</a></div>
       </header>
-      <div v-if="selected || previewFile" class="result-body">
+      <p v-if="refreshError" class="error-text" role="alert">{{ refreshError }}</p><div v-if="selected || previewFile" class="result-body"><p v-if="selected?.source_recording" class="passage-job-source">来自通行视频：{{ selected.source_recording.source_name }} · {{ selected.source_recording.camera_id }} · {{ new Date(selected.source_recording.started_at).toLocaleString('zh-CN') }} <RouterLink :to="{ path: '/recordings', query: { recording: selected.source_recording.id } }">返回通行视频</RouterLink></p><p v-if="selected?.source_recording">本作业固定执行完整流水线与视频跟踪，完成后将船名、吃水及作业状态回写通行视频。</p>
         <div class="preview-grid">
           <section class="preview-panel"><h3>原始数据</h3><video v-if="originalSource && previewVideo" :src="originalSource" controls preload="metadata"></video><img v-else-if="originalSource" :src="originalSource" alt="原始上传数据" /><div v-else class="preview-empty">选择文件后显示原图或原视频</div></section>
           <section class="preview-panel"><h3>结果可视化</h3><video v-if="resultSource && previewVideo" :src="resultSource" controls preload="metadata"></video><img v-else-if="resultSource" :src="resultSource" alt="推理可视化结果" /><div v-else class="preview-empty">任务完成后在此显示可视化结果</div></section>
         </div>
-        <div v-if="previewFiles.length > 1" class="preview-pager"><el-button circle aria-label="上一文件" :disabled="previewIndex === 0" @click="previewIndex--"><ChevronLeft :size="16" /></el-button><span>{{ previewIndex + 1 }} / {{ previewFiles.length }}</span><el-button circle aria-label="下一文件" :disabled="previewIndex >= previewFiles.length - 1" @click="previewIndex++"><ChevronRight :size="16" /></el-button></div>
+        <div v-if="previewCount > 1" class="preview-pager"><el-button circle aria-label="上一文件" :disabled="previewIndex === 0" @click="previewIndex--"><ChevronLeft :size="16" /></el-button><span>{{ previewIndex + 1 }} / {{ previewCount }}</span><el-button circle aria-label="下一文件" :disabled="previewIndex >= previewCount - 1" @click="previewIndex++"><ChevronRight :size="16" /></el-button></div>
         <p v-if="selected?.error" class="error-text">错误：{{ selected.error }}</p>
         <el-button v-if="active" type="danger" plain @click="cancel">取消任务</el-button>
-        <el-table v-if="selected" :data="selected.items" class="result-table"><el-table-column prop="filename" label="文件" /><el-table-column prop="status" label="状态" width="100" /><el-table-column prop="progress" label="进度" width="90" /><el-table-column label="详细结果" width="120"><template #default="scope"><a v-if="scope.row.result_uri" :href="`/api/jobs/${selected?.id}/files/${scope.row.result_uri}`" target="_blank">JSON/JSONL</a></template></el-table-column></el-table>
+        <el-table v-if="selected?.summary?.instances.length" :data="selected.summary.instances"><el-table-column prop="instance_id" label="轨迹" /><el-table-column prop="recognized_zh" label="船名" /><el-table-column prop="draft_depth_m" label="吃水 (m)" /></el-table><el-table v-if="selected" :data="selected.items" class="result-table"><el-table-column prop="filename" label="文件" /><el-table-column prop="status" label="状态" width="100"><template #default="scope">{{ jobStatusLabels[scope.row.status] || scope.row.status }}</template></el-table-column><el-table-column prop="progress" label="进度" width="90" /><el-table-column prop="processed_samples" label="已处理帧" width="100" /><el-table-column prop="error" label="错误" /><el-table-column label="详细结果" width="120"><template #default="scope"><a v-if="scope.row.result_uri" :href="`/api/jobs/${selected?.id}/files/${scope.row.result_uri}`" target="_blank">JSON/JSONL</a></template></el-table-column></el-table>
       </div>
       <div v-else class="result-empty">选择本地文件后，可在这里并列查看原始数据与可视化结果。</div>
     </section>
 
-    <section class="panel job-list-panel"><header class="panel-header"><div><span class="section-kicker">任务队列</span><h2>历史任务</h2></div></header><el-table :data="jobs" @row-click="selectJob"><el-table-column prop="created_at" label="提交时间" /><el-table-column prop="id" label="任务" /><el-table-column prop="status" label="状态" /><el-table-column prop="progress" label="进度" /></el-table></section>
+    <section class="panel job-list-panel"><header class="panel-header"><div><span class="section-kicker">任务队列</span><h2>历史任务</h2></div></header><el-table :data="jobs" @row-click="selectJob"><el-table-column prop="created_at" label="提交时间" /><el-table-column prop="id" label="任务" /><el-table-column prop="status" label="状态"><template #default="scope">{{ jobStatusLabels[scope.row.status] || scope.row.status }}</template></el-table-column><el-table-column prop="progress" label="进度" /></el-table></section>
   </div>
 </template>
 

@@ -9,11 +9,13 @@ from .api import router, shutdown_realtime
 from .database import Base, engine
 from .jobs import job_manager
 from .recording_api import router as recording_router
+from .recording import recording_manager
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    job_manager.bind_recordings(recording_manager)
     job_manager.start()
     try:
         yield

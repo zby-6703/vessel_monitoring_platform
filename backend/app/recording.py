@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .config import get_settings
 from .optical_recording import OpticalCycleMixin
 from .monitoring_audit import record_event
+from .detail_focus import detail_focus
 
 
 class RecordingSettings(BaseModel):
@@ -62,6 +63,9 @@ class RecordingSettings(BaseModel):
     center_y: float = Field(default=.5, ge=0, le=1)
     padding: float = Field(default=.2, ge=0, le=1)
     # Realtime inference admission is independent of the recording switch.
+    enable_ship_name: bool = True
+    enable_draft: bool = True
+    auto_region_focus: bool = False
     target_filter_enabled: bool = True
     min_target_height_ratio: float = Field(default=.06, ge=0, le=.8)
     min_target_width_ratio: float = Field(default=.12, ge=0, le=1)
@@ -183,6 +187,7 @@ class RecordingManager(OpticalCycleMixin):
         self.focus: dict | None = None
         self.active: dict | None = None
         self.catalog: dict[str, dict] = {}
+        self.analysis_pins: set[str] = set()
         self.last_maintenance = 0.
         self._initialize_optical_cycle()
         recover = []
@@ -299,6 +304,13 @@ class RecordingManager(OpticalCycleMixin):
         if self.error:
             return
         fps = min(120., max(1., fps if math.isfinite(fps) else 25.))
+        if source_type == "camera" and detail_focus.busy():
+            if self.active:
+                if timestamp - self.active["start"] >= self.settings.max_clip_seconds or image.shape[:2] != self.active["shape"]:
+                    self._finish("max_duration" if image.shape[:2] == self.active["shape"] else "resolution_changed")
+                else:
+                    self._write_frame(image, timestamp)
+            return
         if not self.active and self.last_seen is not None and timestamp - self.last_seen > self.settings.post_roll_seconds:
             self.hits = 0
             self.first_seen = None
@@ -563,6 +575,8 @@ class RecordingManager(OpticalCycleMixin):
             return {"items": [self._public_item(i) for i in items[(page - 1) * page_size:page * page_size]], "total": len(items), "page": page, "page_size": page_size}
 
     def _delete(self, recording_id: str):
+        if recording_id in self.analysis_pins or self.catalog.get(recording_id, {}).get("analysis", {}).get("status") in {"queued", "running"}:
+            raise ValueError("录像正在离线分析，完成或取消作业后再删除")
         # IDs come only from the validated in-memory catalog, never a raw path.
         target = (self.root / recording_id).resolve()
         if target.parent != self.root or not re.fullmatch(r"[a-f0-9]{32}", recording_id):
@@ -577,6 +591,41 @@ class RecordingManager(OpticalCycleMixin):
                     _atomic_json(target / "manifest.json", self.catalog[recording_id])
                 raise ValueError("录像文件正在使用或无法删除，请关闭播放/下载后重试") from exc
         self.catalog.pop(recording_id, None)
+
+    def update_analysis(self, job: dict):
+        with self.lock:
+            recording_id = job["source_recording"]["id"]
+            item = self.catalog.get(recording_id)
+            if item is None:
+                return
+            previous = item.get("analysis") or {}
+            if previous.get("created_at", "") > job["created_at"]:
+                return
+            item.setdefault("analysis_job_ids", [])
+            if job["id"] not in item["analysis_job_ids"]:
+                item["analysis_job_ids"].append(job["id"])
+            item["analysis"] = {key: job.get(key) for key in ("id", "status", "progress", "error", "created_at", "completed_at", "items", "options")}
+            if job["status"] == "completed":
+                summary = job.get("summary") or {}
+                item["analysis_result"] = {"job_id": job["id"], "completed_at": job["completed_at"], **summary}
+                item.setdefault("live_ship_names", list(item["ship_names"]))
+                item["ship_names"] = list(dict.fromkeys([*item["live_ship_names"], *summary.get("ship_names", [])]))
+            _atomic_json(self.root / recording_id / "manifest.json", item)
+
+    def record_focus_event(self, recording_id: str, state: dict):
+        with self.lock:
+            item = self.catalog.get(recording_id)
+            if item is not None:
+                item.setdefault("focus_events", []).append({"time": datetime.now(timezone.utc).isoformat(), **state})
+                _atomic_json(self.root / recording_id / "manifest.json", item)
+
+    def reconcile_analysis(self, known_job_ids: set[str]):
+        with self.lock:
+            for item in self.catalog.values():
+                analysis = item.get("analysis") or {}
+                if analysis.get("status") in {"queued", "running"} and analysis.get("id") not in known_job_ids:
+                    analysis.update(status="failed", error="关联离线作业未找到，请重新分析", completed_at=datetime.now(timezone.utc).isoformat())
+                    _atomic_json(self.root / item["id"] / "manifest.json", item)
 
     def delete_recording(self, recording_id: str):
         with self.lock:

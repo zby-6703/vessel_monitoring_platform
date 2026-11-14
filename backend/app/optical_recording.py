@@ -16,6 +16,7 @@ import numpy as np
 from .vessel_selection import VesselTargetSelector
 from .scene_motion import BackgroundMotionEstimator
 from .monitoring_audit import record_event
+from .detail_focus import detail_focus
 
 
 class OpticalCycleMixin:
@@ -649,6 +650,13 @@ class OpticalCycleMixin:
                 self._halt_optical("cycle_timeout")
                 return
             if not self.active.get("media_stopped"):
+                if detail_focus.busy():
+                    # Focus search produces deliberately blurry frames. Keep
+                    # source footage, but never treat those misses as departure.
+                    self._flush_optical_media(timestamp)
+                    self._write_frame(image, timestamp)
+                    self._empty_since = None
+                    return
                 # Before first acquisition (and during lens motion) absence of
                 # an identity is NOT proof of departure. Stream actual frames
                 # straight to disk rather than dropping a bounded JPEG cache.

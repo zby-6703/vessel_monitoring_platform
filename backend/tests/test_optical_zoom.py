@@ -61,6 +61,15 @@ def test_read_magnification_uses_only_actual_calibrated_idle_positions(monkeypat
     assert all(action in {"GetStatus", "GetConfigurationOptions"} for action, _ in calls)
 
 
+def test_pan_motion_cannot_be_reported_as_a_stable_reference_view(monkeypatch, optical_settings):
+    control = live_capture.OnvifControl()
+    status = zoom_status(.1)
+    movement = status.find(f".//{{{SCHEMA}}}MoveStatus")
+    ET.SubElement(movement, f"{{{SCHEMA}}}PanTilt").text = "MOVING"
+    mock_device(monkeypatch, control, positions=[status])
+    assert control.read_magnification() is None
+
+
 def test_idle_zoom_measurement_cannot_overwrite_a_new_view_or_active_cycle(tmp_path):
     from app.recording import RecordingManager
     manager = RecordingManager(tmp_path)

@@ -36,6 +36,9 @@ from .target_processing import RealtimeTargetProcessor
 from .schemas import TaskKind
 from .storage import ResultStorage
 from .tracking import InstanceAggregator, TrackTrackTracker
+from .camera_motion import CameraMotionMixin
+from .detail_focus import detail_focus
+from .inference.scheduler import inference_scheduler
 
 
 def safe_camera_error(error: Exception | str, settings: Settings | None = None) -> str:
@@ -126,6 +129,8 @@ class CameraCapture:
         with self.lock:
             if self.is_alive():
                 raise RuntimeError("摄像头采集仍在运行或停止中")
+            if detail_focus.busy():
+                raise RuntimeError("上一次区域对焦仍在停止，请稍后启动采集")
             recording_manager.set_zoom_controller(onvif_control)
             config = recording_manager.get_settings()
             if config.get("enabled") and config.get("recording_mode") == "optical_cycle":
@@ -145,6 +150,7 @@ class CameraCapture:
             return self.snapshot()
 
     def stop(self) -> dict:
+        detail_focus.stop()
         self._shutdown_requested.set()
         self.stop_event.set()
         self._zoom_observation_stop.set()
@@ -171,7 +177,8 @@ class CameraCapture:
         models = None
         try:
             models = ModelRegistry(settings)
-            models.load()
+            with inference_scheduler.slot(realtime=True):
+                models.load(realtime=True)
             attempt = 0
             while not self._shutdown_requested.is_set():
                 # Never reuse model tensors or change source identity while an
@@ -285,6 +292,8 @@ class CameraCapture:
                 # a lens command. A frame captured across a transition remains
                 # stale rather than being relabelled as the new field of view.
                 captured_context = recording_manager.zoom_observation_context()
+                if detail_focus.busy():
+                    captured_context = {**captured_context, "accept_detections": False, "focus_moving": True}
                 ok, image = capture.read()
                 if not ok:
                     if self.stop_event.is_set():
@@ -292,6 +301,7 @@ class CameraCapture:
                     failure_reason = "camera_read_failed"
                     raise RuntimeError("摄像头视频中断；本次片段已结束，正在等待自动重连")
                 timestamp = time.monotonic()
+                detail_focus.observe(image, captured_context)
                 vessels = observation_context = None
                 try:
                     vessels, observation_context = detections.get_nowait()
@@ -314,6 +324,8 @@ class CameraCapture:
                 self._status.update(status="failed", error=failure)
         finally:
             self.stop_event.set()
+            detail_focus.stop()
+            detail_focus.wait()
             self._zoom_observation_stop.set()
             if capture is not None:
                 capture.release()
@@ -423,26 +435,29 @@ class CameraCapture:
                 except queue.Empty:
                     continue
                 infer_started = time.monotonic()
-                result = service.infer(image, task_id=session["session_id"], source_filename=source_name,
-                    task=TaskKind.REGION_DETECTION, observed_at=observed_at, frame_index=source_index, source_frame_index=source_index)
-                ensure_detection_available(result)
-                generation = observation_context.get("generation") if observation_context else None
-                if generation != last_generation:
-                    last_detection_at = None
-                    last_generation = generation
-                if self.stop_event.is_set():
-                    break
-                tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
-                for vessel in result.vessels:
-                    match = Pipeline._best_track(vessel.ship.xyxy, tracks)
-                    if match:
-                        vessel.track_id = int(match.track_id)
-                context = observation_context
-                latest_context = recording_manager.zoom_observation_context()
-                if context and context.get("generation") != latest_context.get("generation"):
-                    context = {**context, "accept_detections": False}
-                processor.process(service, result, image, observed_at.timestamp(),
-                    RecordingSettings.model_validate(recording_manager.get_settings()), context)
+                with inference_scheduler.slot(realtime=True):
+                    if self.stop_event.is_set():
+                        break
+                    result = service.infer(image, task_id=session["session_id"], source_filename=source_name,
+                        task=TaskKind.REGION_DETECTION, observed_at=observed_at, frame_index=source_index, source_frame_index=source_index)
+                    ensure_detection_available(result)
+                    generation = observation_context.get("generation") if observation_context else None
+                    if generation != last_generation:
+                        last_detection_at = None
+                        last_generation = generation
+                    if self.stop_event.is_set():
+                        break
+                    tracks = Pipeline._tracks_for_frame(tracker, result, image, processed + 1)
+                    for vessel in result.vessels:
+                        match = Pipeline._best_track(vessel.ship.xyxy, tracks)
+                        if match:
+                            vessel.track_id = int(match.track_id)
+                    context = observation_context
+                    latest_context = recording_manager.zoom_observation_context()
+                    if context and context.get("generation") != latest_context.get("generation"):
+                        context = {**context, "accept_detections": False}
+                    processor.process(service, result, image, observed_at.timestamp(),
+                        RecordingSettings.model_validate(recording_manager.get_settings()), context)
                 detection_at = time.monotonic()
                 result.processing_ms = (detection_at - infer_started) * 1000
                 elapsed = detection_at - (last_detection_at if last_detection_at is not None else infer_started)
@@ -457,6 +472,7 @@ class CameraCapture:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 live = self.live_frame(result, session["camera_id"], current)
+                detail_focus.consider(onvif_control, live, observation_context, recording_manager)
                 _replace_latest(detections, (live["vessels"], observation_context))
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
                 repository.save_realtime_frame(result, session["session_id"], "camera", source_name, session["camera_id"], result_uri)
@@ -488,7 +504,7 @@ class CameraCapture:
                         self._inference_error = safe_camera_error(exc, settings)
 
 
-class OnvifControl:
+class OnvifControl(CameraMotionMixin):
     """Manual lens control and calibrated, absolute optical zoom movements."""
     PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
     IMAGING = "http://www.onvif.org/ver20/imaging/wsdl"
@@ -641,6 +657,9 @@ class OnvifControl:
         if not math.isfinite(position):
             raise RuntimeError("摄像头返回无效的变焦位置")
         movement = document.findtext(f".//{{{self.SCHEMA}}}MoveStatus/{{{self.SCHEMA}}}Zoom")
+        pan_movement = document.findtext(f".//{{{self.SCHEMA}}}MoveStatus/{{{self.SCHEMA}}}PanTilt")
+        if pan_movement and pan_movement.strip().upper() != "IDLE":
+            movement = pan_movement
         return position, movement.strip().upper() if movement else None, zoom.attrib.get("space")
 
     def _stop_zoom(self, settings: Settings) -> None:
@@ -766,6 +785,7 @@ class OnvifControl:
                     "absolute_zoom_supported": False, "calibrated": False,
                     "magnifications": [], "cycle_supported": False, "zoom_error": None, "error": None,
                     "measured_zoom_factor": None}
+        response.update(pan_tilt_supported=False, absolute_pan_tilt_supported=False, region_focus_supported=False)
         if not configured:
             response.update(error="未配置 ONVIF PTZ 服务及媒体 Profile Token", zoom_error="光学循环录制尚未配置摄像头")
             return response
@@ -783,6 +803,17 @@ class OnvifControl:
                         response["focus_error"] = "设备未声明 ONVIF 自动对焦能力，可使用近焦、远焦或设备网页调整对焦"
                 except Exception as exc:
                     response["focus_error"] = safe_camera_error(exc, settings)
+                try:
+                    self.focus_options()
+                    self.focus_position()
+                    response["region_focus_supported"] = True
+                except Exception as exc:
+                    response["region_focus_error"] = safe_camera_error(exc, settings)
+            try:
+                motion = self.motion_options()
+                response.update(pan_tilt_supported="continuous" in motion, absolute_pan_tilt_supported="absolute" in motion)
+            except Exception as exc:
+                response["pan_tilt_error"] = safe_camera_error(exc, settings)
             try:
                 options = self._zoom_options(settings)
                 response["absolute_zoom_supported"] = True
@@ -813,7 +844,11 @@ class OnvifControl:
         if action == "stop":
             self.cancel_move()
         with self.lock:
-            if action in {"zoom_in", "zoom_out"}:
+            if action in {"pan_left", "pan_right", "tilt_up", "tilt_down"}:
+                self.pan_tilt(action)
+            elif action in {"save_view", "restore_view"}:
+                self.monitor_view(restore=action == "restore_view")
+            elif action in {"zoom_in", "zoom_out"}:
                 velocity = .35 if action == "zoom_in" else -.35
                 self._request(settings, self.PTZ, "ContinuousMove", profile + f'<t:Velocity><tt:Zoom x="{velocity}"/></t:Velocity><t:Timeout>PT0.4S</t:Timeout>')
             elif action == "home":

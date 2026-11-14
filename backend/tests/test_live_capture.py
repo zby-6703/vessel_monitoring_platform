@@ -23,7 +23,7 @@ class FakeModels:
     def __init__(self, settings):
         self.settings = settings
 
-    def load(self):
+    def load(self, *, realtime=False):
         pass
 
     def release(self):
@@ -567,7 +567,7 @@ def test_transient_read_failure_reconnects_serially_with_new_session_and_one_mod
     active = {"workers": 0, "maximum": 0}
 
     class Models(FakeModels):
-        def load(self): calls.append("load")
+        def load(self, *, realtime=False): calls.append("load")
         def release(self): calls.append("release-model")
 
     class Recorder(FrameRecorder):
@@ -660,7 +660,7 @@ def test_model_load_error_never_enters_reconnect_attempt(monkeypatch):
     attempts = []
 
     class BrokenModel(FakeModels):
-        def load(self): raise RuntimeError("invalid deployment")
+        def load(self, *, realtime=False): raise RuntimeError("invalid deployment")
 
     monkeypatch.setattr(live_capture, "ModelRegistry", BrokenModel)
     monkeypatch.setattr(worker, "_run_attempt", lambda *_: attempts.append(True))

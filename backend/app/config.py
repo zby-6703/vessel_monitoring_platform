@@ -183,4 +183,5 @@ model_config_service = ModelConfigService()
 
 
 def get_effective_settings() -> Settings:
-    return model_config_service.effective_settings()
+    from .camera_profiles import camera_profile_service
+    return camera_profile_service.effective(model_config_service.effective_settings())

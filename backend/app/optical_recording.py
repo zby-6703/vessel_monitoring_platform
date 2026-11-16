@@ -190,20 +190,24 @@ class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
 
     def optical_control_busy(self) -> bool:
         with self.lock:
+            if self._manual_zoom_active:
+                return True
             if self._can_accept_recovery_observation():
                 return False
-            return bool(self._control_future is not None or self._optical_session and self.settings.enabled)
+            return bool(self._manual_zoom_active or self._control_future is not None or self._optical_session and self.settings.enabled)
 
     def _can_accept_recovery_observation(self):
         return (self.phase == "error" and self._zoom_failure_kind == "transport"
+                and not self._manual_zoom_active
                 and self._control_future is None and self.settings.enabled
                 and not self._cycle_halt and not self._cycle_no_more_frames)
 
     def zoom_observation_context(self) -> dict:
         with self.lock:
             return {"generation": self._cycle_generation, "phase": self.phase,
-                    "accept_detections": self.phase in {"overview", "waiting_body", "zoomed"} and not self._cycle_halt,
-                    "zoom_factor": self.current_zoom_factor, "pan_offset": self._pan_offset}
+                    "accept_detections": self.phase in {"overview", "waiting_body", "zoomed"} and not self._cycle_halt and not self._manual_zoom_active,
+                    "zoom_factor": self.current_zoom_factor, "pan_offset": self._pan_offset,
+                    "line_patrol": self._patrol_status()}
 
     def observe_zoom_factor(self, factor, generation=None):
         """Accept a read-only lens measurement only for the same idle view."""
@@ -643,6 +647,8 @@ class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
         return None
 
     def _process_optical_frame(self, image, fps, timestamp, vessels, observation_context):
+        if self._manual_zoom_active:
+            return
         self.focus = {"x": 0., "y": 0., "width": 1., "height": 1.}
         self._check_zoom_timeout()
         if not self._optical_session:

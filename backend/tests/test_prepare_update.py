@@ -36,3 +36,19 @@ def test_slow_existing_api_is_not_treated_as_a_stopped_platform(monkeypatch):
     client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handler))
     monkeypatch.setattr(module.httpx, "Client", lambda **kwargs: client)
     with pytest.raises(httpx.ReadTimeout): module.main()
+
+
+def test_shutdown_waits_for_manual_optical_movement_even_without_recording(monkeypatch):
+    module = load_script()
+    samples = []
+    def handler(request):
+        if request.url.path == "/": return httpx.Response(200, json={"service": "VesselSight Operations API"})
+        if request.url.path == "/api/recording/status":
+            samples.append(True)
+            return httpx.Response(200, json={"phase": "overview", "media_recording": False, "manual_zoom_active": len(samples) == 1})
+        return httpx.Response(200, json={"status": "idle"})
+    client = httpx.Client(base_url="http://127.0.0.1:8010", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(module.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    module.main()
+    assert len(samples) == 2

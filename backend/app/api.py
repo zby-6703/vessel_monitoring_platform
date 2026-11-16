@@ -494,6 +494,8 @@ def camera_status():
 @router.post("/api/realtime/camera/start", status_code=202, tags=["realtime"])
 async def start_camera(body: CameraStartRequest | None = None):
     with _source_lock:
+        if recording_manager.status().get("manual_zoom_active"):
+            raise HTTPException(409, "正在手动调倍，请等待镜头到位后启动采集")
         if local_playback.is_alive():
             raise HTTPException(409, "请先停止本地视频回放，等待当前会话结束后再启动摄像头")
         try:
@@ -517,6 +519,39 @@ def camera_ptz_status():
     return response
 
 
+class OpticalZoomRequest(BaseModel):
+    factor: float = Field(ge=1, le=40, allow_inf_nan=False)
+
+
+@router.post("/api/camera/zoom", tags=["realtime"])
+def manual_optical_zoom(body: OpticalZoomRequest):
+    with _source_lock:
+        settings = recording_manager.get_settings()
+        if (camera_capture.is_alive() and settings["enabled"] and settings["recording_mode"] == "optical_cycle"):
+            raise HTTPException(409, "自动光学循环已开启，请先关闭循环并保存或停止采集，等待归位后手动调倍")
+        if detail_focus.busy():
+            raise HTTPException(409, "请先停止区域对焦或等待对焦完成")
+        try:
+            if body.factor not in onvif_control.available_magnifications():
+                raise ValueError("所选光学倍率未标定，请选择设备已标定的倍率")
+            generation = recording_manager.begin_manual_zoom()
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, safe_camera_error(exc, get_effective_settings())) from exc
+    confirmed = None
+    try:
+        result = onvif_control.move_to(body.factor)
+        if result.get("settled") is not True or not math.isclose(float(result.get("factor", -1)), body.factor, abs_tol=.001):
+            raise RuntimeError("镜头未确认到达指定光学倍率")
+        confirmed = body.factor
+        return result
+    except Exception as exc:
+        raise HTTPException(502, safe_camera_error(exc, get_effective_settings())) from exc
+    finally:
+        recording_manager.end_manual_zoom(confirmed, generation)
+
+
 @router.post("/api/camera/ptz", tags=["realtime"])
 def control_camera(body: PtzRequest):
     try:
@@ -527,8 +562,10 @@ def control_camera(body: PtzRequest):
         if recording_manager.optical_control_busy():
             if body.action != "stop":
                 raise ValueError("光学循环录制正在控制镜头，请先关闭录制或停止采集后再手动操作")
+            manual_zoom = recording_manager.status().get("manual_zoom_active", False)
             onvif_control.cancel_move()
-            recording_manager.fail("操作员停止镜头动作，光学录制循环已暂停")
+            if not manual_zoom:
+                recording_manager.fail("操作员停止镜头动作，光学录制循环已暂停")
         if body.action in {"zoom_in", "zoom_out", "home", "stop", "pan_left", "pan_right", "tilt_up", "tilt_down", "restore_view"}:
             recording_manager.invalidate_zoom_observation()
         return onvif_control.command(body.action)
@@ -555,9 +592,10 @@ def focus_region(body: FocusRegionRequest):
     if body.left >= body.right or body.top >= body.bottom:
         raise HTTPException(422, "聚焦区域左上角必须小于右下角")
     try:
-        if not camera_capture.is_alive() or recording_manager.optical_control_busy():
-            raise ValueError("手动选区对焦需要启动摄像头采集并暂停自动光学循环")
-        return detail_focus.start(onvif_control, (body.left, body.top, body.right, body.bottom))
+        with _source_lock:
+            if not camera_capture.is_alive() or recording_manager.optical_control_busy():
+                raise ValueError("手动选区对焦需要启动摄像头采集并暂停自动光学循环")
+            return detail_focus.start(onvif_control, (body.left, body.top, body.right, body.bottom))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

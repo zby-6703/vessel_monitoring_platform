@@ -8,7 +8,7 @@ import RecordingControls from '../components/RecordingControls.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
 import { getFocusStatus, startRegionFocus, stopRegionFocus, type FocusRegion, type FocusStatus } from '../api'
-import { getDefaultRecordingSettings } from '../api'
+import { getDefaultRecordingSettings, setOpticalZoom } from '../api'
 const focusStatus = ref<FocusStatus | null>(null)
 const focusPicking = ref(false)
 async function focusRegion(region: FocusRegion) {
@@ -76,7 +76,7 @@ const latestStages = computed(() => {
 const monitorName = computed(() => sourceMode.value === 'local' ? localPlayback.value?.filename || '本地视频验证' : stream.value?.name || '现场摄像头')
 const opticalMode = computed(() => settings.value.recording_mode === 'optical_cycle')
 const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && (!settings.value.auto_horizontal_follow || ptz.value.horizontal_follow_supported) && ptz.value.magnifications?.some((factor) => factor > 1 && (settings.value.adaptive_zoom_enabled ? factor <= settings.value.max_optical_zoom : Math.abs(factor - settings.value.zoom_factor) < .001))))
-const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
+const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'camera' && savedSettings.value.recording_mode === 'optical_cycle' ? savedSettings.value : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
 const sourceError = computed(() => sourceMode.value === 'local' ? localPlayback.value?.error : camera.value?.error)
 const levelLabel = (level: string) => ({ normal: '正常', warning: '关注', critical: '超载', unknown: '待判定' }[level] || level)
 const modelNames: Record<string, string> = { ship_detection: '船舶/吃水区域/船名检测', draft_multitask: '吃水多任务', ship_name_recognition: '船名识别' }
@@ -148,6 +148,14 @@ async function sendPtz(action: PtzAction) {
   ptzBusy.value = true
   try { await controlPtz(action); ElMessage.success(action === 'stop' ? '已停止摄像头运动' : '摄像头控制指令已发送'); await refreshPtz(); await refreshCapture() }
   catch (error) { ElMessage.error(apiError(error, '摄像头控制失败')) } finally { ptzBusy.value = false }
+}
+async function manualZoom(factor: number) {
+  ptzBusy.value = true
+  try {
+    const result = await setOpticalZoom(factor)
+    ElMessage.success(`镜头已确认到达光学 ${result.factor}×`)
+  } catch (error) { ElMessage.error(apiError(error, '手动光学调倍失败')) }
+  finally { await refreshCapture(); ptzBusy.value = false }
 }
 function scheduleRealtimeStatisticsRefresh() {
   if (statisticsRefreshTimer) return
@@ -263,7 +271,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
         <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @restore-defaults="restoreDefaultSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @restore-defaults="restoreDefaultSettings" @ptz="sendPtz" @zoom="manualZoom" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">

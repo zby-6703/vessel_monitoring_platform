@@ -16,6 +16,8 @@ class OpticalPatrolMixin:
         self._patrol_follow_started = False
         self._patrol_overview_since = None
         self._patrol_candidate = None
+        self._patrol_entry_hits = 0
+        self._patrol_entry_last = None
 
     def _patrol_event(self, event, timestamp, **values):
         self.catalog[self.active["id"]].setdefault("patrol_events", []).append({
@@ -57,6 +59,8 @@ class OpticalPatrolMixin:
         self._empty_since = self._association_lost_since = None
         self._reacquire_candidate = None
         self._patrol_candidate = None
+        self._patrol_entry_hits = 0
+        self._patrol_entry_last = None
         self._phase("waiting_body")
 
     def _find_patrol_target(self, image, timestamp):
@@ -176,11 +180,20 @@ class OpticalPatrolMixin:
             entry_line = policy.overview_line_left if rightward else policy.overview_line_right
             before_entry = bow < entry_line if rightward else bow > entry_line
             if before_entry:
+                self._patrol_overview_since = None
+                self._patrol_entry_hits = 0
+                self._patrol_entry_last = None
                 self._zoom_wait_reason = "waiting_overview_line"
                 return
+            observed_at = (observation_context or {}).get("source_timestamp", timestamp)
+            if self._patrol_entry_last is not None and observed_at <= self._patrol_entry_last:
+                return
+            self._patrol_entry_last = observed_at
+            self._patrol_entry_hits += 1
             if self._patrol_overview_since is None:
-                self._patrol_overview_since = timestamp
-            if timestamp - self._patrol_overview_since < policy.overview_settle_seconds:
+                self._patrol_overview_since = observed_at
+            if self._patrol_entry_hits < 2 or observed_at - self._patrol_overview_since < policy.overview_settle_seconds:
+                self._zoom_wait_reason = "confirming_overview_line"
                 return
             plan = self.target_selector.plan_zoom(target, policy, self.available_magnifications())
             if plan["zoom_factor"] <= 1:
@@ -196,10 +209,15 @@ class OpticalPatrolMixin:
                         selection_reason=plan["selection_reason"], requested_zoom_factor=plan["requested_zoom_factor"])
             if self._patrol_passes == 1:
                 item["initial_optical_zoom_factor"] = self._active_zoom_factor
-            self._patrol_event("zoom_in", timestamp, bow=bow, tail=tail, **plan)
+            self._patrol_event("zoom_in", timestamp, bow=bow, tail=tail, entry_line=entry_line,
+                               entry_confirm_hits=self._patrol_entry_hits, observation_source_seconds=observed_at, **plan)
             self._command_zoom(self._active_zoom_factor, "zooming_in")
             return
 
+        if self.phase == "waiting_body":
+            self._patrol_overview_since = None
+            self._patrol_entry_hits = 0
+            self._patrol_entry_last = None
         # Ambiguous visible hulls retain footage but cannot dispatch a movement.
         positive = self._visible_detail_target(image, vessels, observation_context)
         if positive:

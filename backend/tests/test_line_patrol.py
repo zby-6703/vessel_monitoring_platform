@@ -26,6 +26,11 @@ def acquire(h, x, *, reverse=False):
         h.drain_control()
 
 
+def cross_entry(h, x=-.15, width=.5, *, reverse=False):
+    for _ in range(2): h.feed([boat(x, width, reverse=reverse)], advance=.2)
+    h.phase("zoomed")
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_overview_bow_crosses_entry_line_before_zoom_without_overview_pan(cycle_factory, reverse):
     h = patrol(cycle_factory)
@@ -34,6 +39,8 @@ def test_overview_bow_crosses_entry_line_before_zoom_without_overview_pan(cycle_
     rid = h.manager.active["id"]
     h.feed([boat(-.2, reverse=reverse)])
     assert h.controller.calls == [1] and not h.controller.pan_calls
+    h.feed([boat(-.15, reverse=reverse)])
+    assert h.controller.calls == [1]
     h.feed([boat(-.15, reverse=reverse)])
     h.phase("zoomed")
     assert h.controller.calls == [1, 3] and not h.controller.pan_calls
@@ -46,7 +53,7 @@ def test_detail_waits_for_stern_line_then_pans_only_in_travel_direction(cycle_fa
     h = patrol(cycle_factory, pan_max_left_travel_ratio=.08, pan_max_right_travel_ratio=.21)
     h.warm()
     h.feed([boat(-.25, reverse=reverse)])
-    h.feed([boat(-.15, reverse=reverse)]); h.phase("zoomed")
+    cross_entry(h, reverse=reverse)
     acquire(h, .38, reverse=reverse)  # at 3x, tail=.14 (reverse=.86)
     assert not h.controller.pan_calls
     calls = []
@@ -55,8 +62,8 @@ def test_detail_waits_for_stern_line_then_pans_only_in_travel_direction(cycle_fa
         calls.append((step, kwargs))
         return original(step, **kwargs)
     monkeypatch.setattr(h.controller, "follow_horizontal", pan)
-    # Walk the stern to 2/3 of the enlarged view (1/3 when reversed).
-    for x in (.42, .46, .50, .54, .557):
+    # The first line along travel is 1/3 (2/3 when reversed).
+    for x in (.42, .445):
         h.feed([boat(x, reverse=reverse)], advance=.5); h.drain_control()
     assert calls
     assert all((step < 0) == reverse for step, _ in calls)
@@ -70,7 +77,7 @@ def test_multiple_zoom_passes_keep_one_file_until_original_view_stern_leaves(cyc
     h.warm()
     h.feed([boat(-.25, reverse=reverse)])
     rid = h.manager.active["id"]
-    h.feed([boat(-.15, reverse=reverse)]); h.phase("zoomed")
+    cross_entry(h, reverse=reverse)
     acquire(h, .38, reverse=reverse)
     # Reach the range limit, then retain enlarged footage while visible.
     def limited(step, **kwargs):
@@ -117,13 +124,13 @@ def test_configured_overview_gate_and_unknown_direction_do_not_guess(cycle_facto
     assert h.manager._patrol_direction == 0 and h.controller.calls == [1]
     h.feed([boat(.12, width=.3)])
     assert h.manager._patrol_direction == 1 and h.controller.calls == [1]
-    h.feed([boat(.17, width=.3)]); h.phase("zoomed")
+    cross_entry(h, x=.17, width=.3)
     assert h.controller.calls == [1, 3]
 
 
 def test_empty_zoomed_view_waits_for_entry_and_never_completes_pass_early(cycle_factory):
     h = patrol(cycle_factory, target_acquire_timeout_seconds=5)
-    h.warm(); h.feed([boat(-.25)]); h.feed([boat(-.15)]); h.phase("zoomed")
+    h.warm(); h.feed([boat(-.25)]); cross_entry(h)
     rid = h.manager.active["id"]
     for _ in range(5): h.feed([], advance=.5)
     assert h.controller.calls == [1, 3] and h.manager.active["id"] == rid
@@ -137,7 +144,7 @@ def test_stale_empty_detection_cannot_return_the_current_zoom(cycle_factory):
     h = patrol(cycle_factory)
     h.warm(); h.feed([boat(-.25)])
     old = h.manager.zoom_observation_context()
-    h.feed([boat(-.15)]); h.phase("zoomed"); acquire(h, .38)
+    cross_entry(h); acquire(h, .38)
     for _ in range(10): h.feed([], context=old, advance=1)
     assert h.controller.calls == [1, 3]
 
@@ -158,26 +165,73 @@ def test_removing_vertical_boundary_limit_uses_height_and_calibrated_six_x():
     assert plan["zoom_factor"] == 6 and plan["selection_reason"] == "adaptive_calibrated"
 
 
+def test_single_edge_box_jitter_cannot_reverse_direction_and_zoom_before_entry(cycle_factory):
+    h = patrol(cycle_factory)
+    h.warm()
+    h.feed([boat(.10, width=.20)])
+    # The bow remains at x=.30, before the left entry line. Only the rear
+    # edge jitters, shifting the box centre left without a right-to-left ship.
+    for _ in range(3):
+        h.feed([boat(.075, width=.225)], advance=.5)
+        h.drain_control()
+    assert h.controller.calls == [1] and h.manager.phase == "waiting_body"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_separated_entry_line_outliers_do_not_accumulate_as_continuous_crossing(cycle_factory, reverse):
+    h = patrol(cycle_factory, overview_settle_seconds=.4)
+    h.warm()
+    h.feed([boat(-.25, reverse=reverse)])
+    h.feed([boat(-.15, reverse=reverse)], advance=.1)
+    h.feed([boat(-.20, reverse=reverse)], advance=.5)
+    h.feed([boat(-.15, reverse=reverse)], advance=.1)
+    h.drain_control()
+    assert h.controller.calls == [1] and h.manager.phase == "waiting_body"
+
+
+def test_repeated_delivery_of_one_source_frame_cannot_confirm_entry(cycle_factory):
+    h = patrol(cycle_factory)
+    h.warm(); h.feed([boat(-.25)])
+    context = {**h.manager.zoom_observation_context(), "source_timestamp": h.timestamp}
+    for _ in range(4): h.feed([boat(-.15)], context=context, advance=.5)
+    assert h.controller.calls == [1] and h.manager._patrol_entry_hits == 1
+    context["source_timestamp"] = h.timestamp
+    h.feed([boat(-.15)], context=context)
+    h.phase("zoomed")
+    event = h.manager.catalog[h.manager.active["id"]]["patrol_events"][-1]
+    assert event["entry_confirm_hits"] == 2 and event["bow"] >= event["entry_line"]
+
+
+def test_manual_lens_reservation_defers_automatic_initialization(cycle_factory):
+    h = patrol(cycle_factory)
+    generation = h.manager.begin_manual_zoom()
+    h.feed([boat(-.25)]); h.drain_control()
+    assert not h.controller.calls
+    h.manager.end_manual_zoom(3, generation)
+    h.feed([boat(-.25)]); h.phase("overview")
+    assert h.controller.calls == [1]
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_configurable_detail_lines_use_enlarged_x_coordinates(cycle_factory, reverse, monkeypatch):
     h = patrol(cycle_factory, detail_line_left=.2, detail_line_right=.8)
-    h.warm(); h.feed([boat(-.25, reverse=reverse)]); h.feed([boat(-.15, reverse=reverse)]); h.phase("zoomed")
+    h.warm(); h.feed([boat(-.25, reverse=reverse)]); cross_entry(h, reverse=reverse)
     acquire(h, .38, reverse=reverse)
     def limited(step, **kwargs):
         h.controller.pan_calls.append(step)
         return {"settled": True, "fov_x": 0., "limited": True}
     monkeypatch.setattr(h.controller, "follow_horizontal", limited)
-    for x in (.42, .46, .50, .54, .565):
+    for x in (.38, .39):
         h.feed([boat(x, reverse=reverse)], advance=.4); h.drain_control()
-    # Reference x=.565 becomes detail x=.695, still before the .8 gate.
+    # Reference x=.39 becomes detail x=.17, still before the first (.2) line.
     assert not h.controller.pan_calls
-    h.feed([boat(.602, reverse=reverse)], advance=.4); h.drain_control()
+    h.feed([boat(.405, reverse=reverse)], advance=.4); h.drain_control()
     assert h.controller.pan_calls and (h.controller.pan_calls[0] < 0) == reverse
 
 
 def test_two_overlapping_arrivals_cannot_claim_the_locked_ship(cycle_factory):
     h = patrol(cycle_factory)
-    h.warm(); h.feed([boat(-.25)]); h.feed([boat(-.15)]); h.phase("zoomed")
+    h.warm(); h.feed([boat(-.25)]); cross_entry(h)
     # Neither hull is the locked upstream identity; both are equally plausible.
     for _ in range(8): h.feed([boat(.35, ship_id=98), boat(.36, ship_id=99)], advance=.2)
     assert h.manager.locked_target["ship_id"] == 1
@@ -186,7 +240,7 @@ def test_two_overlapping_arrivals_cannot_claim_the_locked_ship(cycle_factory):
 
 def test_stop_during_repeat_zoom_keeps_return_order_and_closes_same_file(cycle_factory):
     h = patrol(cycle_factory)
-    h.warm(); h.feed([boat(-.25)]); h.feed([boat(-.15)]); h.phase("zoomed")
+    h.warm(); h.feed([boat(-.25)]); cross_entry(h)
     acquire(h, .38); h.depart(); h.phase("waiting_body")
     rid = h.manager.active["id"]
     h.controller.block_factor = 3

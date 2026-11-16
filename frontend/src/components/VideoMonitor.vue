@@ -6,7 +6,7 @@ import { cyclePhaseLabel, patrolStageLabel, selectionReasonLabel, type Processin
 import type { FocusRegion } from '../api'
 
 interface OverlayBox { type: string; xywh: [number, number, number, number]; confidence: number; class_name?: string }
-interface OverlayFrame { source_width: number; source_height: number; processing_ms: number; processing_summary?: ProcessingSummary; vessels: Array<{ ship_id: number; confidence: number; boxes: OverlayBox[]; processing?: TargetProcessing }> }
+interface OverlayFrame { source_width: number; source_height: number; processing_ms: number; processing_summary?: ProcessingSummary; view_context?: { zoom_factor: number | null; line_patrol?: RecordingStatus['line_patrol'] }; vessels: Array<{ ship_id: number; confidence: number; boxes: OverlayBox[]; processing?: TargetProcessing }> }
 const props = defineProps<{ src?: string; frameImage?: string | null; overlay?: OverlayFrame | null; cameraId: string; configured: boolean; loading?: boolean; focusSettings?: RecordingSettings; recording?: boolean; recordingStatus?: RecordingStatus | null; regionPicking?: boolean }>()
 const emit = defineEmits<{ 'focus-center': [value: { x: number; y: number }]; 'focus-region': [value: FocusRegion]; 'cancel-region': [] }>()
 const regionStart = ref<{ x: number; y: number } | null>(null)
@@ -38,10 +38,12 @@ const focused = ref(false)
 const mediaError = ref(false)
 const optical = computed(() => props.focusSettings?.recording_mode === 'optical_cycle')
 const patrolGuides = computed(() => {
-  if (!optical.value || !props.focusSettings?.line_patrol_enabled || props.recordingStatus?.current_zoom_factor == null) return []
-  const detail = props.recordingStatus.current_zoom_factor > 1
-  const policy = props.recordingStatus.line_patrol
-  const lines = props.recordingStatus.active_id && policy ? (detail ? policy.detail_lines : policy.overview_lines)
+  const view = props.overlay?.view_context
+  const factor = view ? view.zoom_factor : props.recordingStatus?.current_zoom_factor
+  const policy = view?.line_patrol || props.recordingStatus?.line_patrol
+  if (!optical.value || !props.focusSettings?.line_patrol_enabled || factor == null || policy?.enabled === false) return []
+  const detail = factor > 1
+  const lines = policy ? (detail ? policy.detail_lines : policy.overview_lines)
     : detail ? [props.focusSettings.detail_line_left, props.focusSettings.detail_line_right] : [props.focusSettings.overview_line_left, props.focusSettings.overview_line_right]
   return lines.map((x, index) => ({ x, label: `${detail ? '放大' : '原倍率'}${index ? '右线' : '左线'} ${(x * 100).toFixed(1)}%` }))
 })

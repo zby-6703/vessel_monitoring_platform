@@ -20,7 +20,8 @@ def main():
         deadline = time.monotonic() + 100
         while time.monotonic() < deadline:
             recording = client.get("/api/recording/status").raise_for_status().json()
-            if recording["phase"] in {"overview", "error"} and not recording.get("media_recording"):
+            if (recording["phase"] in {"overview", "error"} and not recording.get("media_recording")
+                    and not recording.get("manual_zoom_active")):
                 print("Local capture drained; ready to update.")
                 return
             time.sleep(.25)

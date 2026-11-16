@@ -104,7 +104,7 @@ class OpticalFollowingMixin:
             if not self._patrol_direction:
                 return False
             tail = box[0] if self._patrol_direction > 0 else box[2]
-            boundary = policy.detail_line_right if self._patrol_direction > 0 else policy.detail_line_left
+            boundary = policy.detail_line_left if self._patrol_direction > 0 else policy.detail_line_right
             distance = (tail - boundary) * self._patrol_direction
             if distance < -1e-6:
                 return False

@@ -132,6 +132,7 @@ class RecordingManager(OpticalCycleMixin):
         self.active: dict | None = None
         self.catalog: dict[str, dict] = {}
         self.analysis_pins: set[str] = set()
+        self._manual_zoom_active = False
         self.last_maintenance = 0.
         self._initialize_optical_cycle()
         recover = []
@@ -171,6 +172,19 @@ class RecordingManager(OpticalCycleMixin):
                 except (OSError, ValueError) as exc:
                     raise ValueError("默认现场配置无法读取，请检查共享配置文件；本机已保存配置保持不变") from exc
             return RecordingSettings().model_dump()
+
+    def begin_manual_zoom(self):
+        with self.lock:
+            if self.optical_control_busy():
+                raise ValueError("镜头正在自动控制或调倍，请先停止采集或关闭自动光学循环并等待归位")
+            self._manual_zoom_active = True
+            self.invalidate_zoom_observation()
+            return self._cycle_generation
+
+    def end_manual_zoom(self, factor, generation):
+        with self.lock:
+            self._manual_zoom_active = False
+            self.observe_zoom_factor(factor, generation)
 
     def update_settings(self, value: dict | RecordingSettings) -> dict:
         with self.lock:
@@ -499,6 +513,7 @@ class RecordingManager(OpticalCycleMixin):
                     "buffer_seconds": round(self.buffer[-1][0] - self.buffer[0][0], 2) if len(self.buffer) > 1 else 0,
                     "error": self.error, "source_name": self.source_name, "storage_bytes": self._storage_bytes(), "zoom_capability": "optical" if self._optical_session else "digital", "focus": self.focus,
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
+                    "manual_zoom_active": self._manual_zoom_active,
                     "horizontal_follow": {"enabled": self.settings.auto_horizontal_follow, "moving": self.phase == "panning",
                         "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced},
                     "detail_capture_priority": (self._cycle_policy or self.settings).detail_capture_priority,

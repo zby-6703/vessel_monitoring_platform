@@ -5,7 +5,7 @@ import type { FocusRegion, FocusStatus } from '../api'
 import { cyclePhaseLabel, formatBytes, patrolStageLabel, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
 
 const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; sourceStatus?: string; processingSummary?: ProcessingSummary | null; focusStatus?: FocusStatus | null }>()
-const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'restore-defaults': []; 'refresh-ptz': []; 'pick-focus': []; 'stop-focus': []; 'focus-region': [region: FocusRegion] }>()
+const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; zoom: [factor: number]; reset: []; 'restore-defaults': []; 'refresh-ptz': []; 'pick-focus': []; 'stop-focus': []; 'focus-region': [region: FocusRegion] }>()
 const region = reactive({ left: .25, top: .25, right: .75, bottom: .75 })
 function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettings[K]) {
   const next = { ...props.modelValue, [field]: value }
@@ -43,7 +43,12 @@ const operationNote = computed(() => {
     ? '现场采集与自动录制已开启：先确认 1× 全景，再对符合条件的移动船舶启动循环。'
     : '视频采集与自动录制已开启，等待符合条件的船舶触发。'
 })
-const manualBusy = computed(() => props.sourceMode === 'camera' && (optical.value && props.modelValue.enabled || ['initializing', 'waiting_body', 'panning', 'zooming_in', 'zoomed', 'zooming_out', 'rearming'].includes(props.status?.phase || '')))
+const manualBusy = computed(() => props.sourceMode === 'camera' && (props.status?.manual_zoom_active || ['initializing', 'waiting_body', 'panning', 'zooming_in', 'zoomed', 'zooming_out', 'rearming', 'recovering'].includes(props.status?.phase || '') || ['starting', 'running', 'reconnecting'].includes(props.sourceStatus || '') && props.status?.state !== 'disabled' && (optical.value || props.status?.zoom_driver === 'optical')))
+const manualFactors = computed(() => (props.ptz?.magnifications || []).filter((factor) => factor >= 1 && factor <= 40).sort((a, b) => a - b))
+const manualFactor = computed(() => props.status ? props.status.current_zoom_factor : props.ptz?.measured_zoom_factor)
+const smallerFactor = computed(() => manualFactor.value == null ? undefined : manualFactors.value.filter((factor) => factor < manualFactor.value!).slice(-1)[0])
+const largerFactor = computed(() => manualFactor.value == null ? undefined : manualFactors.value.find((factor) => factor > manualFactor.value!))
+const manualZoomBlocked = computed(() => props.sourceMode !== 'camera' || !props.ptz?.absolute_zoom_supported || !props.ptz?.calibrated || props.ptzBusy || manualBusy.value || props.focusStatus?.status === 'focusing')
 const activeStep = computed(() => {
   if (props.modelValue.line_patrol_enabled) {
     if (['overview_exit', 'overview_fallback'].includes(props.status?.line_patrol?.stage || '')) return 4
@@ -107,6 +112,17 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
       <div class="recording-enable"><div><strong>{{ optical ? '启用摄像头自动光学循环' : '仅录制有船经过的画面' }}</strong><p>{{ optical ? modelValue.line_patrol_enabled ? '按两个画面空间的分界线触发放大与水平跟随；同一艘船可重复放大，原倍率船尾离场后保存整段。' : '先录制全景，船舶主体入画后选择可用倍率放大；按已开启的水平策略跟随，回到原机位后重新选船。' : '同步保存全景与数字聚焦视频，空闲时仅保留内存缓冲。' }}</p></div><el-switch :model-value="modelValue.enabled" :disabled="!loaded || saving" aria-label="启用船舶通行自动录制" @update:model-value="set('enabled', Boolean($event))" /></div>
       <p class="setting-hint recording-operation-note" role="status">{{ operationNote }}</p>
       <p v-if="status?.error" class="recording-error" role="alert">{{ status.error }}</p>
+      <section v-if="sourceMode === 'camera'" class="realtime-recognition" aria-label="手动光学倍率">
+        <strong>手动光学倍率</strong>
+        <p role="status">{{ ptzBusy || status?.manual_zoom_active ? '镜头操作中，等待实际到位反馈' : manualFactor == null ? '当前倍率待确认' : `当前光学 ${manualFactor}×` }}</p>
+        <div class="ptz-buttons">
+          <el-button :disabled="manualZoomBlocked || smallerFactor == null" @click="smallerFactor != null && emit('zoom', smallerFactor)">缩小一档</el-button>
+          <el-button v-for="factor in manualFactors" :key="factor" :type="manualFactor === factor ? 'primary' : undefined" :plain="manualFactor !== factor" :disabled="manualZoomBlocked" @click="emit('zoom', factor)">{{ factor }}×</el-button>
+          <el-button :disabled="manualZoomBlocked || largerFactor == null" @click="largerFactor != null && emit('zoom', largerFactor)">放大一档</el-button>
+          <el-button type="danger" plain :disabled="!ptz?.configured" @click="emit('ptz', 'stop')">停止运动</el-button>
+        </div>
+        <p class="setting-hint">{{ manualBusy ? '自动循环正在占用镜头。可停止采集，或关闭自动光学循环并保存，等待归位后手动调倍；关闭循环后可保留实时检测预览。' : '按钮直接移动真实光学镜头，只提供已标定倍率；1× 返回原倍率，调倍完成后显示实际确认值。' }}</p>
+      </section>
       <template v-if="optical">
         <section class="realtime-recognition" aria-label="自动左右跟随与入画等待">
           <div class="recognition-toggle"><strong>自动左右跟随船舶</strong><el-switch :model-value="modelValue.auto_horizontal_follow" :disabled="!loaded || saving" aria-label="自动左右跟随船舶" @update:model-value="set('auto_horizontal_follow', Boolean($event))" /></div>
@@ -115,7 +131,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <p class="setting-hint">单次最多修正当前画面宽度的 {{ Math.round(modelValue.pan_step_limit * 50) }}%；{{ modelValue.line_patrol_enabled ? `原位向左最多 ${Math.round(modelValue.pan_max_left_travel_ratio * 100)}%，向右最多 ${Math.round(modelValue.pan_max_right_travel_ratio * 100)}%` : `原位左右各最多 ${Math.round(modelValue.pan_max_travel_ratio * 100)}%` }}，比例以云台全行程计，尚未标定为实际角度。</p>
           <div class="recognition-toggle"><strong>分界线触发 · 同船多轮放大</strong><el-switch :model-value="modelValue.line_patrol_enabled" :disabled="!loaded || saving" aria-label="分界线触发多轮放大" @update:model-value="set('line_patrol_enabled', Boolean($event))" /></div>
           <template v-if="modelValue.line_patrol_enabled">
-            <p class="setting-hint">两个画面空间各自从左至右记为 0–100%。左→右：船头越过原倍率左线后放大，船尾触碰放大画面右线后开始右旋；到上限保持放大至船尾离场。缩回并归位后，船尾尚未到原倍率右线则再次放大，否则只录原倍率至离场。右→左对称处理，整艘船保存在同一段录像。</p>
+            <p class="setting-hint">两个画面空间各自从左至右记为 0–100%。原倍率船头触线后需连续新观测确认，退回线前会重新计时；监测画面显示已保存应用的分界线。左→右：船头越过原倍率左线后放大，船尾越过放大画面第一条线（左线）后开始右旋；到上限保持放大至船尾离场。缩回并归位后，船尾尚未到原倍率右线则再次放大，否则只录原倍率至离场。右→左使用放大画面右线触发左旋，整艘船保存在同一段录像。</p>
             <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
               <el-form-item label="原倍率左分界线 (画面 x %)"><el-input-number :model-value="Number((modelValue.overview_line_left * 100).toFixed(2))" :min="1" :max="99" :step="1" :precision="2" controls-position="right" @update:model-value="set('overview_line_left', Number($event) / 100)" /></el-form-item>
               <el-form-item label="原倍率右分界线 (画面 x %)"><el-input-number :model-value="Number((modelValue.overview_line_right * 100).toFixed(2))" :min="1" :max="99" :step="1" :precision="2" controls-position="right" @update:model-value="set('overview_line_right', Number($event) / 100)" /></el-form-item>

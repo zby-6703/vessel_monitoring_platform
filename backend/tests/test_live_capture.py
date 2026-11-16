@@ -243,7 +243,39 @@ def test_camera_pairs_detection_with_context_from_before_capture_and_lens_transi
     assert contexts[0]["generation"] == 0
     assert recorder.frames[1]["observation_context"]["generation"] == 0
     assert recorder.frames[1]["vessels"] == []
+    assert contexts[0]["source_frame_index"] == 0
+    assert contexts[0]["source_timestamp"] <= recorder.frames[1]["timestamp"]
     assert all(item["source_type"] == "camera" for item in recorder.frames)
+
+
+def test_matching_preview_is_published_before_lens_decision_and_database_io(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    import queue
+    worker = live_capture.CameraCapture(None, api._live_frame)
+    events, published = [], []
+    class Detections(queue.Queue):
+        def put_nowait(self, item):
+            events.append("control")
+            worker.stop_event.set()
+            super().put_nowait(item)
+    class Repository(NullRepository):
+        def save_realtime_frame(self, *_): events.append("database")
+    def publish(payload, _loop):
+        events.append("image")
+        published.append(payload)
+    monkeypatch.setattr(worker, "_publish", publish)
+    monkeypatch.setattr(live_capture, "recording_manager", FrameRecorder())
+    monkeypatch.setattr(live_capture, "ResultRepository", Repository)
+    monkeypatch.setattr(live_capture.detail_focus, "consider", lambda *_: None)
+    frames = queue.Queue()
+    context = {"generation": 0, "phase": "overview", "zoom_factor": 1., "accept_detections": True,
+               "source_timestamp": 100., "line_patrol": {"enabled": True, "overview_lines": [.4, .7]}}
+    frames.put((0, np.zeros((48, 64, 3), dtype=np.uint8), datetime.now(timezone.utc), context))
+    settings = replace(get_settings(), result_root=tmp_path / "results")
+    worker._infer_loop(EmptyInference(None), settings,
+        {"camera_id": "test-camera", "session_id": "test-session", "frame_step": 1, "fps": 10}, frames, Detections(), None)
+    assert events == ["image", "control", "database"]
+    assert published[0]["data"]["frame"]["view_context"] == context
 
 
 def test_live_sources_are_exclusive_and_unconfigured_hardware_is_honest(monkeypatch):

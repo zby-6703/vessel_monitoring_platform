@@ -302,6 +302,7 @@ class CameraCapture:
                     failure_reason = "camera_read_failed"
                     raise RuntimeError("摄像头视频中断；本次片段已结束，正在等待自动重连")
                 timestamp = time.monotonic()
+                captured_context = {**captured_context, "source_timestamp": timestamp, "source_frame_index": frame_index}
                 detail_focus.observe(image, captured_context)
                 vessels = observation_context = None
                 try:
@@ -473,7 +474,16 @@ class CameraCapture:
                         active_ids.add(vessel.track_id)
                         current[vessel.track_id] = aggregator.update(vessel.track_id, vessel, result.observed_at)
                 live = self.live_frame(result, session["camera_id"], current)
+                live["view_context"] = observation_context
                 detail_focus.consider(onvif_control, live, observation_context, recording_manager)
+                # Send the matching image/boxes before releasing this result
+                # to lens control. Database I/O must not leave the browser
+                # showing an older, pre-line frame when a zoom is dispatched.
+                ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                if ok:
+                    self._publish({"type": "camera_frame", "data": {"session_id": session["session_id"],
+                        "frame_id": source_index, "camera_id": session["camera_id"],
+                        "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"), "frame": live}}, loop)
                 _replace_latest(detections, (live["vessels"], observation_context))
                 result_uri = storage.relative_uri(storage.append_video_record(stem, result))
                 repository.save_realtime_frame(result, session["session_id"], "camera", source_name, session["camera_id"], result_uri)
@@ -483,11 +493,6 @@ class CameraCapture:
                     storage.append_video_record(stem, instance)
                     repository.save_video_instance(instance, result_uri)
                     repository.save_realtime_instance(instance, session["session_id"], "camera", session["camera_id"], result_uri)
-                ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
-                if ok:
-                    self._publish({"type": "camera_frame", "data": {"session_id": session["session_id"],
-                        "frame_id": source_index, "camera_id": session["camera_id"],
-                        "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"), "frame": live}}, loop)
                 processed += 1
         except Exception as exc:
             with self.lock:

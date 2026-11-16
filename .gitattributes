@@ -1,3 +1,4 @@
 # Keep byte-verified deployment metadata identical to the delivered LF files.
 models/*/deploy_config.yaml text eol=lf
 models/*/delivery_manifest.json text eol=lf
+*.bat text eol=crlf

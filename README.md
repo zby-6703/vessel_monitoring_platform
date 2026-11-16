@@ -4,6 +4,8 @@ VesselSight 是一个可独立部署的船舶视频/图像分析平台。它提�
 
 部署到河边 Windows 电脑请从 [现场部署与日常同步](docs/field-deployment.md) 开始：提供锁定依赖、`setup.ps1`、`start-field.ps1`、`update-field.ps1`、离线检查和模型迁移包校验。共享监测策略与同一摄像头的光学标定保存在 `config/river-monitoring.json`，随 Git 更新；账号密码与设备地址留在本机 `.env`。默认现场策略以采集船名和吃水细节视频为优先：光学放大后保持倍率水平跟随，到边界停转并继续放大录像，确认目标离场后再归位。
 
+完成首次部署后，双击根目录的 [`start-platform.bat`](start-platform.bat) 启动并打开平台，双击 [`stop-platform.bat`](stop-platform.bat) 等待录像收尾并关闭服务。默认使用 Conda `Train`；启动平台后仍需在页面手动开启摄像头采集。
+
 源代码、运行数据和模型权重已分离。当前使用 RT-DETRv4-S 船舶与区域检测、V120 八类字符检测与水体分割，以及独立船名 OCR。克隆仓库后按 [模型说明](models/README.md) 准备当前 ONNX 部署包；运行数据和船名 OCR 资源可从 [resources-v0.1.0](https://github.com/zby-6703/vessel_monitoring_platform/releases/tag/resources-v0.1.0) 获取，该历史资源包不包含前两套新权重。
 
 训练新模型或从 `.pt` 导出部署模型前，请参阅 [新模型 ONNX 导出与接入要求](docs/onnx-model-contract.md)，其中包含三类检测、字符检测与水体分割的张量接口、预处理、配置模板和验收步骤。

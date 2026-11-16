@@ -9,8 +9,11 @@ function Stop-ProcessTree {
     foreach ($child in $children) {
         Stop-ProcessTree -ProcessId $child.ProcessId
     }
-    if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
+    try {
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    } catch {
+        # A child can exit with its parent between enumeration and termination.
+        if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) { throw }
     }
 }
 
@@ -91,8 +94,8 @@ if (Test-Path $ProcessFile) {
     Remove-Item -LiteralPath $ProcessFile -Force
 }
 if ($stopped) {
-    Write-Host "VesselSight development services stopped."
+    Write-Host "VesselSight platform services stopped."
 } else {
-    Write-Host "VesselSight development services are already stopped."
+    Write-Host "VesselSight platform services are already stopped."
 }
 

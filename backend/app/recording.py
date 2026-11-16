@@ -179,7 +179,10 @@ class RecordingManager(OpticalCycleMixin):
                 self.first_seen = None
             if self._optical_session and (settings.recording_mode != self.settings.recording_mode
                     or settings.auto_horizontal_follow != self.settings.auto_horizontal_follow
-                    or settings.detail_capture_priority != self.settings.detail_capture_priority):
+                    or settings.detail_capture_priority != self.settings.detail_capture_priority
+                    or any(getattr(settings, key) != getattr(self.settings, key) for key in (
+                        "line_patrol_enabled", "overview_line_left", "overview_line_right", "detail_line_left", "detail_line_right",
+                        "pan_max_left_travel_ratio", "pan_max_right_travel_ratio", "zoom_view_limits_enabled"))):
                 self._halt_optical("settings_changed")
             self.settings = settings
             if self.phase == "error" and self._control_future is None and self.active is None:
@@ -487,7 +490,9 @@ class RecordingManager(OpticalCycleMixin):
                     "horizontal_follow": {"enabled": self.settings.auto_horizontal_follow, "moving": self.phase == "panning",
                         "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced},
                     "detail_capture_priority": (self._cycle_policy or self.settings).detail_capture_priority,
-                    "zoom_locked_until_departure": bool((self._cycle_policy or self.settings).detail_capture_priority
+                    "line_patrol": self._patrol_status(),
+                    "zoom_locked_until_departure": bool(((self._cycle_policy or self.settings).detail_capture_priority
+                        or (self._cycle_policy or self.settings).line_patrol_enabled)
                         and self._optical_session and self.current_zoom_factor and self.current_zoom_factor > 1
                         and self.phase in {"zoomed", "panning"}),
                     "waiting_full_body": self.phase == "waiting_body",

@@ -91,8 +91,8 @@ class VesselTargetSelector:
         # expressed in the resulting image, so it remains consistent at every
         # calibrated magnification and does not depend on the current width of
         # a partially entering bow.
-        safe = max(1., .47 / edge)
         ceiling = settings.max_optical_zoom if settings.adaptive_zoom_enabled else settings.zoom_factor
+        safe = max(1., .47 / edge) if settings.zoom_view_limits_enabled else ceiling
         # Prefer the detail floor, but use a lower calibrated step when that
         # is the only enlarged view that retains the full vertical hull.
         desired = max(requested, settings.min_optical_zoom) if settings.adaptive_zoom_enabled else requested

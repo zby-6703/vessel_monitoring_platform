@@ -97,6 +97,8 @@ class HorizontalFollowMixin:
             return dict(position)
 
     def follow_horizontal(self, fov_x, *, max_travel_ratio, zoom_factor):
+        if not math.isfinite(max_travel_ratio) or not 0 <= max_travel_ratio <= .4:
+            raise ValueError("无效的水平跟随范围")
         if not math.isfinite(fov_x) or abs(fov_x) > .6 or fov_x == 0:
             raise ValueError("无效的水平跟随步长")
         with self.lock:

@@ -18,6 +18,14 @@ class RecordingSettings(BaseModel):
     zoom_min_hold_seconds: float = Field(default=12, ge=0, le=120)
     auto_horizontal_follow: bool = False
     detail_capture_priority: bool = True
+    line_patrol_enabled: bool = False
+    overview_line_left: float = Field(default=1/3, gt=0, lt=1)
+    overview_line_right: float = Field(default=2/3, gt=0, lt=1)
+    detail_line_left: float = Field(default=1/3, gt=0, lt=1)
+    detail_line_right: float = Field(default=2/3, gt=0, lt=1)
+    pan_max_left_travel_ratio: float = Field(default=.15, ge=0, le=.4)
+    pan_max_right_travel_ratio: float = Field(default=.15, ge=0, le=.4)
+    zoom_view_limits_enabled: bool = True
     pan_dead_zone: float = Field(default=.15, ge=.05, le=.35)
     pan_step_limit: float = Field(default=.3, ge=.05, le=.6)
     pan_cooldown_seconds: float = Field(default=2, ge=.5, le=15)
@@ -66,6 +74,8 @@ class RecordingSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_roll(self):
+        if self.overview_line_left >= self.overview_line_right or self.detail_line_left >= self.detail_line_right:
+            raise ValueError("原倍率与放大画面的左分界线都必须小于右分界线")
         if self.target_roi_left >= self.target_roi_right or self.target_roi_top >= self.target_roi_bottom:
             raise ValueError("监测区域左上坐标必须小于右下坐标")
         if self.min_optical_zoom > self.max_optical_zoom:

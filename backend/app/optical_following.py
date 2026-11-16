@@ -26,6 +26,7 @@ class OpticalFollowingMixin:
         self._empty_hits = 0
         self._zoom_hold_since = None
         self._zoom_settled_pending = False
+        self._initialize_patrol()
 
     def _move_cycle_zoom(self, target, phase, follow):
         result = self.zoom_controller.move_to(target)
@@ -86,6 +87,8 @@ class OpticalFollowingMixin:
         if (not policy.auto_horizontal_follow or self._pan_limited or detail_focus.busy()
                 or self._control_future is not None or self._cycle_halt or self._identity_fallback_active or self._zoom_fallback_active):
             return False
+        if policy.line_patrol_enabled and (self.phase != "zoomed" or float(self.current_zoom_factor or 1.) <= 1):
+            return False
         prealign = self.phase == "waiting_body" and planned_zoom and planned_zoom > 1 and self._body_entry_reason
         if policy.detail_capture_priority and (self.phase != "zoomed" or float(self.current_zoom_factor or 1.) <= 1):
             if not prealign or self._prezoom_alignments >= 1:
@@ -97,9 +100,20 @@ class OpticalFollowingMixin:
             return False
         center = (box[0] + box[2]) / 2
         dead_zone = min(policy.pan_dead_zone, .3 / planned_zoom) if planned_zoom and planned_zoom > 1 else policy.pan_dead_zone
-        if abs(center - .5) <= dead_zone:
-            return False
-        step = max(-policy.pan_step_limit, min(policy.pan_step_limit, 2 * (center - .5)))
+        if policy.line_patrol_enabled:
+            if not self._patrol_direction:
+                return False
+            tail = box[0] if self._patrol_direction > 0 else box[2]
+            boundary = policy.detail_line_right if self._patrol_direction > 0 else policy.detail_line_left
+            distance = (tail - boundary) * self._patrol_direction
+            if distance < -1e-6:
+                return False
+            self._patrol_follow_started = True
+            step = self._patrol_direction * min(policy.pan_step_limit, max(.05, 2 * distance))
+        else:
+            if abs(center - .5) <= dead_zone:
+                return False
+            step = max(-policy.pan_step_limit, min(policy.pan_step_limit, 2 * (center - .5)))
         self._last_pan_adjust = timestamp
         if prealign:
             self._prezoom_alignments += 1
@@ -109,8 +123,9 @@ class OpticalFollowingMixin:
         self._control_target = float(self.current_zoom_factor or 1.)
         self._control_started = time.monotonic()
         self._phase("panning", reset_acquisition=False)
+        travel = (policy.pan_max_right_travel_ratio if step > 0 else policy.pan_max_left_travel_ratio) if policy.line_patrol_enabled else policy.pan_max_travel_ratio
         future = self.control_executor.submit(self.zoom_controller.follow_horizontal, step,
-                                              max_travel_ratio=policy.pan_max_travel_ratio,
+                                              max_travel_ratio=travel,
                                               zoom_factor=self._control_target)
         self._control_future = future
         session_id = self.session_id

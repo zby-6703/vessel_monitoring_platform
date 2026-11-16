@@ -1,4 +1,4 @@
-"""One physical zoom-in / zoom-out operation per saved camera recording.
+"""Physical lens cycles with one saved recording per vessel passage.
 
 All methods run under RecordingManager.lock. Lens I/O uses a separate worker;
 capture keeps writing the actual camera frames while the lens is moving.
@@ -18,9 +18,10 @@ from .scene_motion import BackgroundMotionEstimator
 from .monitoring_audit import record_event
 from .detail_focus import detail_focus
 from .optical_following import OpticalFollowingMixin
+from .optical_patrol import OpticalPatrolMixin
 
 
-class OpticalCycleMixin(OpticalFollowingMixin):
+class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
     TARGET_EVIDENCE_GRACE_SECONDS = 5.
 
     def _initialize_optical_cycle(self):
@@ -409,7 +410,9 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                 self._mark_closed_cycle_returned()
                 if self.active:
                     self.catalog[self.active["id"]]["returned_to_overview"] = True
-                if self._return_for_identity and not self._cycle_halt and not self._cycle_no_more_frames:
+                if self._patrol_returning and self.active and not self._cycle_halt and not self._cycle_no_more_frames:
+                    self._patrol_overview_returned()
+                elif self._return_for_identity and not self._cycle_halt and not self._cycle_no_more_frames:
                     self._return_for_identity = False
                     self._active_zoom_factor = 1.
                     self._phase("zoomed")
@@ -684,7 +687,8 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                 # Before first acquisition (and during lens motion) absence of
                 # an identity is NOT proof of departure. Stream actual frames
                 # straight to disk rather than dropping a bounded JPEG cache.
-                if (not self._zoomed_ship_seen and self._zoom_failure_kind != "transport"
+                if (policy.line_patrol_enabled and not self._zoom_fallback_active
+                        or not self._zoomed_ship_seen and self._zoom_failure_kind != "transport"
                         or self._hold_zoom(timestamp, policy)):
                     # A longer observation window must retain actual source
                     # frames instead of overflowing the bounded tail cache.
@@ -736,6 +740,10 @@ class OpticalCycleMixin(OpticalFollowingMixin):
         self.adaptive_selection = self.target_selector.update(qualified, image.shape[1], image.shape[0], timestamp, policy,
             zoom_factor=actual_zoom, calibrated_factors=self.available_magnifications(), camera_motion=background,
             image=image, view_offset=self._pan_offset)
+        if (policy.line_patrol_enabled and self.active and not self._zoom_fallback_active
+                and not self._identity_fallback_active):
+            self._process_patrol_observation(image, vessels, observation_context, timestamp, policy)
+            return
         if self.phase == "overview":
             candidate = self.adaptive_selection["selected"]
             candidate_id = candidate["target_id"] if candidate else None
@@ -763,6 +771,8 @@ class OpticalCycleMixin(OpticalFollowingMixin):
             self._pan_limited = False
             self._last_pan_adjust = None
             self._prezoom_alignments = 0
+            self._initialize_patrol()
+            self._patrol_first_box = self._source_target_box(candidate, image.shape[1], image.shape[0])
             self._body_since = self._body_last_seen = self._body_width = None
             self._body_hits = 0
             self._body_wait_since = timestamp
@@ -775,6 +785,7 @@ class OpticalCycleMixin(OpticalFollowingMixin):
                         target_height_ratio=candidate["height_ratio"], selection_reason=self.adaptive_selection["selection_reason"],
                         requested_zoom_factor=self.adaptive_selection["requested_zoom_factor"],
                         adaptive_zoom=policy.adaptive_zoom_enabled, detail_capture_priority=policy.detail_capture_priority,
+                        line_patrol_enabled=policy.line_patrol_enabled,
                         target_reacquired=False, target_decision=dict(self.locked_target))
             self._record_optical_attributes([candidate])
             for sample_timestamp, encoded in self.buffer:
@@ -784,7 +795,7 @@ class OpticalCycleMixin(OpticalFollowingMixin):
             self._clear_buffer()
             self._write_frame(image, timestamp)
             # Open the file and write the triggering full-view frame FIRST.
-            if policy.wait_full_body:
+            if policy.wait_full_body or policy.line_patrol_enabled:
                 self._active_zoom_factor = 1.
                 item.update(optical_zoom_factor=1., initial_optical_zoom_factor=1., waiting_full_body=True)
                 self._phase("waiting_body")

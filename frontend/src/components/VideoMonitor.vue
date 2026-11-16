@@ -2,7 +2,7 @@
 import mpegts from 'mpegts.js'
 import { Crosshair, Maximize, Pause, Play, ScanLine, ZoomIn } from 'lucide-vue-next'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { cyclePhaseLabel, selectionReasonLabel, type ProcessingSummary, type RecordingSettings, type RecordingStatus, type TargetProcessing } from '../api'
+import { cyclePhaseLabel, patrolStageLabel, selectionReasonLabel, type ProcessingSummary, type RecordingSettings, type RecordingStatus, type TargetProcessing } from '../api'
 import type { FocusRegion } from '../api'
 
 interface OverlayBox { type: string; xywh: [number, number, number, number]; confidence: number; class_name?: string }
@@ -37,6 +37,14 @@ const sourceSize = ref({ width: 16, height: 9 })
 const focused = ref(false)
 const mediaError = ref(false)
 const optical = computed(() => props.focusSettings?.recording_mode === 'optical_cycle')
+const patrolGuides = computed(() => {
+  if (!optical.value || !props.focusSettings?.line_patrol_enabled || props.recordingStatus?.current_zoom_factor == null) return []
+  const detail = props.recordingStatus.current_zoom_factor > 1
+  const policy = props.recordingStatus.line_patrol
+  const lines = props.recordingStatus.active_id && policy ? (detail ? policy.detail_lines : policy.overview_lines)
+    : detail ? [props.focusSettings.detail_line_left, props.focusSettings.detail_line_right] : [props.focusSettings.overview_line_left, props.focusSettings.overview_line_right]
+  return lines.map((x, index) => ({ x, label: `${detail ? '放大' : '原倍率'}${index ? '右线' : '左线'} ${(x * 100).toFixed(1)}%` }))
+})
 const selectedTarget = computed(() => props.recordingStatus?.locked_target || props.recordingStatus?.adaptive_selection?.selected || null)
 const stationaryCount = computed(() => props.recordingStatus?.adaptive_selection?.targets.filter((target) => target.motion_state === 'stationary').length || 0)
 let player: mpegts.Player | null = null
@@ -112,6 +120,7 @@ onBeforeUnmount(() => { player?.destroy() })
       <img v-if="frameImage" class="playback-frame" :src="frameImage" alt="实时推理画面" @load="imageLoaded" />
       <video v-else-if="src" ref="video" :src="src.includes('.flv') ? undefined : src" muted autoplay playsinline @loadedmetadata="videoLoaded" @error="mediaError = true" @play="playing = true" @pause="playing = false" @timeupdate="elapsed = video?.currentTime || 0" @durationchange="duration = video?.duration || 0"></video>
       <div v-for="(box, index) in liveBoxes" :key="`${box.type}-${index}`" class="detection-box" :class="[`${box.type.replace(/_/g, '-')}-box`, { 'lightweight-box': box.lightweight }]" :style="box.style" :title="box.title"><span>{{ box.label }}</span></div>
+      <div v-for="guide in patrolGuides" :key="guide.label" class="patrol-guide" :style="{ left: `${guide.x * 100}%` }"><span>{{ guide.label }}</span></div>
       <div v-if="!optical && focusSettings && !focused && (frameImage || src) && crop.width < .99" class="focus-crop-outline" :style="cropStyle"><span><Crosshair :size="11" />录制特写范围</span></div>
     </div>
     <div v-if="(!src && !frameImage) || mediaError" class="monitor-loading" role="status" aria-live="polite"><ScanLine :size="28" /><strong>{{ mediaError ? '画面暂不可播放' : loading ? '正在连接并初始化模型' : '等待监测画面' }}</strong><span>{{ mediaError ? '启动摄像头采集可显示实时推理帧，请同时检查流地址' : '收到真实视频帧后显示检测与聚焦范围' }}</span></div>
@@ -122,7 +131,7 @@ onBeforeUnmount(() => { player?.destroy() })
     </div>
     <div class="camera-badge"><span class="status-dot" :class="configured ? 'online' : 'offline'"></span>{{ cameraId }}<b v-if="recording" class="recording-live-indicator">● REC</b></div>
     <div v-if="overlay" class="inference-badge"><ScanLine :size="14" /> {{ inferenceFps?.toFixed(1) }} FPS <span>{{ overlay.processing_ms.toFixed(1) }} ms</span></div>
-    <div v-if="optical" class="optical-monitor-state" role="status"><ZoomIn :size="13" /><strong>{{ recordingStatus?.current_zoom_factor == null ? '镜头倍率待确认' : `光学 ${recordingStatus.current_zoom_factor}×` }}</strong><span>{{ recordingStatus?.state === 'disabled' ? '循环未开启' : cyclePhaseLabel(recordingStatus?.phase, recordingStatus?.awaiting_zoomed_target) }}</span></div>
+    <div v-if="optical" class="optical-monitor-state" role="status"><ZoomIn :size="13" /><strong>{{ recordingStatus?.current_zoom_factor == null ? '镜头倍率待确认' : `光学 ${recordingStatus.current_zoom_factor}×` }}</strong><span>{{ recordingStatus?.state === 'disabled' ? '循环未开启' : recordingStatus?.line_patrol?.enabled && recordingStatus.active_id ? patrolStageLabel(recordingStatus.line_patrol.stage) : cyclePhaseLabel(recordingStatus?.phase, recordingStatus?.awaiting_zoomed_target) }}</span></div>
     <div v-if="optical && (selectedTarget || stationaryCount)" class="optical-selection-badge" role="status"><template v-if="selectedTarget">{{ recordingStatus?.locked_target ? '本轮锁定' : '优先候选' }} · 目标 {{ selectedTarget.target_id }}<template v-if="selectedTarget.height_ratio"> · 1× 船高 {{ (selectedTarget.height_ratio * 100).toFixed(1) }}%</template></template><template v-if="stationaryCount">{{ selectedTarget ? ' · ' : '' }}{{ stationaryCount }} 个静止目标</template></div>
     <div v-else-if="focusSettings" class="focus-view-switch" @click.stop>
       <button :class="{ active: !focused }" @click="focused = false">全景</button><button :class="{ active: focused }" @click="focused = true"><ZoomIn :size="13" />聚焦 {{ (1 / crop.width).toFixed(1) }}×</button>
@@ -139,6 +148,8 @@ onBeforeUnmount(() => { player?.destroy() })
 </template>
 
 <style scoped>
+.patrol-guide { position: absolute; top: 0; bottom: 0; z-index: 4; border-left: 1px dashed #ffd27a; pointer-events: none; }
+.patrol-guide span { position: absolute; top: 15%; left: 4px; white-space: nowrap; color: #ffe8bc; background: #101a22dd; padding: 3px 5px; font-size: 10px; }
 .focus-region-picker { position: absolute; inset: 0; z-index: 15; cursor: crosshair; touch-action: none; outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
 .focus-region-picker > span { position: absolute; top: 44px; left: 12px; color: white; background: #101a22dd; padding: 7px 10px; font-size: 12px; }
 .focus-region-outline { position: absolute; border: 2px solid #56dfb0; background: #56dfb020; pointer-events: none; }

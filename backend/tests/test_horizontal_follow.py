@@ -234,3 +234,18 @@ def test_uncalibrated_first_pan_cannot_wrap_the_native_boundary(device):
     result = control.follow_horizontal(.3, max_travel_ratio=.15, zoom_factor=1)
     assert result["limited"] and result["fov_x"] == 0
     assert not calls and state["x"] == .99
+
+
+@pytest.mark.parametrize("step", [-.3, .3])
+def test_zero_directional_travel_range_holds_without_a_move(device, step):
+    control, state, calls, _, _ = device
+    control.begin_horizontal_follow()
+    result = control.follow_horizontal(step, max_travel_ratio=0, zoom_factor=1)
+    assert result["limited"] and result["fov_x"] == 0 and not calls
+
+
+@pytest.mark.parametrize("travel", [-.1, float("nan"), float("inf"), .5])
+def test_invalid_travel_range_is_rejected_before_camera_io(device, travel):
+    control, _, calls, _, _ = device
+    with pytest.raises(ValueError): control.follow_horizontal(.3, max_travel_ratio=travel, zoom_factor=1)
+    assert not calls

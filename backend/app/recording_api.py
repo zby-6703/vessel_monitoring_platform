@@ -26,6 +26,14 @@ def save_settings(payload: RecordingSettings):
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.get("/api/recording/settings/defaults")
+def default_settings():
+    try:
+        return recording_manager.get_default_settings()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/api/recording/status")
 def status():
     return recording_manager.status()

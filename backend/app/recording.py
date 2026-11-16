@@ -103,6 +103,7 @@ class RecordingManager(OpticalCycleMixin):
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="passage-encoder")
         self.settings_path = self.root / "settings.json"
+        self.site_profile_path = Path(site_profile_path).resolve() if site_profile_path else None
         self.settings = RecordingSettings()
         self.error: str | None = None
         if self.settings_path.is_file():
@@ -110,10 +111,10 @@ class RecordingManager(OpticalCycleMixin):
                 self.settings = RecordingSettings.model_validate_json(self.settings_path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 self.error = "录制配置无法读取，请重新保存设置"
-        if site_profile_path:
+        if self.site_profile_path and (not self.settings_path.is_file() or self.error):
             from .site_profile import load_site_profile, sync_recording_policy
             try:
-                self.settings = sync_recording_policy(self.settings_path, self.settings, load_site_profile(site_profile_path), force=bool(self.error))
+                self.settings = sync_recording_policy(self.settings_path, self.settings, load_site_profile(self.site_profile_path), force=bool(self.error))
                 self.error = None
             except (ValueError, OSError):
                 self.error = "共享现场配置无法读取或无效，请运行部署检查后重启"
@@ -159,6 +160,17 @@ class RecordingManager(OpticalCycleMixin):
     def get_settings(self) -> dict:
         with self.lock:
             return self.settings.model_dump()
+
+    def get_default_settings(self) -> dict:
+        """Preview deployment defaults without changing local settings or I/O."""
+        with self.lock:
+            if self.site_profile_path:
+                from .site_profile import load_site_profile
+                try:
+                    return load_site_profile(self.site_profile_path).recording.model_dump()
+                except (OSError, ValueError) as exc:
+                    raise ValueError("默认现场配置无法读取，请检查共享配置文件；本机已保存配置保持不变") from exc
+            return RecordingSettings().model_dump()
 
     def update_settings(self, value: dict | RecordingSettings) -> dict:
         with self.lock:

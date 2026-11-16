@@ -65,14 +65,11 @@ def _write_json(path, value):
 
 
 def sync_recording_policy(settings_path: Path, current: RecordingSettings, profile: SiteProfile, *, force=False) -> RecordingSettings:
-    """Apply once per shared content version; retain local edits in between."""
+    """Seed a new installation; valid saved local settings always win."""
+    if settings_path.is_file() and not force:
+        return current
     marker = settings_path.with_name("settings.shared-profile.json")
     digest = profile.digest()
-    try:
-        if not force and settings_path.is_file() and json.loads(marker.read_text(encoding="utf-8")).get("sha256") == digest:
-            return current
-    except (OSError, ValueError, AttributeError):
-        pass
     if settings_path.is_file():
         _write_json(settings_path.with_name("settings.before-shared-profile.json"), current.model_dump())
     updated = profile.recording.model_copy(deep=True)

@@ -348,6 +348,7 @@ export function startRegionFocus(region: FocusRegion) { return api.post<FocusSta
 export function stopRegionFocus() { return api.post<FocusStatus>('/camera/focus/stop').then(({ data }) => data) }
 
 export function getRecordingSettings() { return api.get<RecordingSettings>('/recording/settings').then(({ data }) => data) }
+export function getDefaultRecordingSettings() { return api.get<RecordingSettings>('/recording/settings/defaults').then(({ data }) => data) }
 export function updateRecordingSettings(settings: RecordingSettings) { return api.put<RecordingSettings>('/recording/settings', settings).then(({ data }) => data) }
 export function getRecordingStatus() { return api.get<RecordingStatus>('/recording/status').then(({ data }) => data) }
 export function getRecordings(params: Record<string, unknown> = {}) {

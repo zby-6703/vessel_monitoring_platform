@@ -72,6 +72,28 @@ def test_settings_and_status_are_available_and_partial_settings_persist(recordin
     assert isinstance(status.json(), dict)
 
 
+def test_default_settings_endpoint_is_a_read_only_preview(recording_client):
+    from app.recording_settings import RecordingSettings
+    client, manager = recording_client
+    saved = client.put("/api/recording/settings", json={"enabled": False, "detail_line_right": .83}).json()
+    before = manager.settings_path.read_bytes()
+    response = client.get("/api/recording/settings/defaults")
+    assert response.status_code == 200 and response.json() == RecordingSettings().model_dump()
+    assert client.get("/api/recording/settings").json() == saved
+    assert manager.settings_path.read_bytes() == before
+    reset = client.put("/api/recording/settings", json=response.json())
+    assert reset.status_code == 200 and reset.json() == response.json()
+
+
+def test_bad_deployment_defaults_return_error_without_changing_saved_settings(recording_client):
+    client, manager = recording_client
+    manager.site_profile_path = manager.root / "missing-defaults.json"
+    saved = client.put("/api/recording/settings", json={"enabled": False, "overview_line_left": .29}).json()
+    response = client.get("/api/recording/settings/defaults")
+    assert response.status_code == 422 and "默认现场配置" in response.json()["detail"]
+    assert client.get("/api/recording/settings").json() == saved
+
+
 @pytest.mark.parametrize("values", [
     {"pre_roll_seconds": -1},
     {"confidence_threshold": 2},

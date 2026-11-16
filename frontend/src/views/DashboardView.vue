@@ -8,6 +8,7 @@ import RecordingControls from '../components/RecordingControls.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
 import { getFocusStatus, startRegionFocus, stopRegionFocus, type FocusRegion, type FocusStatus } from '../api'
+import { getDefaultRecordingSettings } from '../api'
 const focusStatus = ref<FocusStatus | null>(null)
 const focusPicking = ref(false)
 async function focusRegion(region: FocusRegion) {
@@ -130,10 +131,18 @@ async function saveSettings() {
   try {
     const result = await updateRecordingSettings(settings.value)
     settings.value = { ...defaultRecordingSettings(), ...result }; savedSettings.value = { ...settings.value }
-    await refreshCapture(); ElMessage.success(result.enabled ? '目标识别与自动录制策略已保存' : '目标识别策略已保存，自动录制保持关闭')
+    await refreshCapture(); ElMessage.success(result.enabled ? '配置已保存并应用，下次启动继续使用本机保存配置' : '配置已保存，自动录制关闭；下次启动继续使用本机保存配置')
   } catch (error) { ElMessage.error(apiError(error, '录制设置保存失败')) } finally { savingSettings.value = false }
 }
 function resetSettings() { if (savedSettings.value) settings.value = { ...savedSettings.value } }
+async function restoreDefaultSettings() {
+  savingSettings.value = true
+  try {
+    settings.value = { ...defaultRecordingSettings(), ...await getDefaultRecordingSettings() }
+    ElMessage.info('已载入默认配置，点击“保存并应用”后生效；可恢复上次保存的配置')
+  } catch (error) { ElMessage.error(apiError(error, '默认配置读取失败，本机保存配置保持不变')) }
+  finally { savingSettings.value = false }
+}
 function setFocusCenter(center: { x: number; y: number }) { settings.value = { ...settings.value, center_x: center.x, center_y: center.y } }
 async function sendPtz(action: PtzAction) {
   ptzBusy.value = true
@@ -254,7 +263,7 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
         <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
+      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @restore-defaults="restoreDefaultSettings" @ptz="sendPtz" @refresh-ptz="refreshPtz" />
     </section>
 
     <section class="lower-grid monitoring-results-grid">

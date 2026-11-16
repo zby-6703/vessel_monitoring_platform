@@ -5,7 +5,7 @@ import type { FocusRegion, FocusStatus } from '../api'
 import { cyclePhaseLabel, formatBytes, patrolStageLabel, selectionReasonLabel, targetMotionLabel, type AdaptiveTarget, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordingSettings, type RecordingStatus } from '../api'
 
 const props = defineProps<{ modelValue: RecordingSettings; status: RecordingStatus | null; saving: boolean; loaded: boolean; dirty: boolean; ptz: PtzStatus | null; ptzBusy: boolean; sourceMode: 'camera' | 'local'; sourceStatus?: string; processingSummary?: ProcessingSummary | null; focusStatus?: FocusStatus | null }>()
-const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'refresh-ptz': []; 'pick-focus': []; 'stop-focus': []; 'focus-region': [region: FocusRegion] }>()
+const emit = defineEmits<{ 'update:modelValue': [settings: RecordingSettings]; save: []; ptz: [action: PtzAction]; reset: []; 'restore-defaults': []; 'refresh-ptz': []; 'pick-focus': []; 'stop-focus': []; 'focus-region': [region: FocusRegion] }>()
 const region = reactive({ left: .25, top: .25, right: .75, bottom: .75 })
 function set<K extends keyof RecordingSettings>(field: K, value: RecordingSettings[K]) {
   const next = { ...props.modelValue, [field]: value }
@@ -251,7 +251,8 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
       </el-collapse>
       <div class="recording-storage"><HardDrive :size="14" /><span>{{ formatBytes(status?.storage_bytes || 0) }} / {{ modelValue.max_storage_gb }} GB</span><span v-if="!optical">缓冲 {{ (status?.buffer_seconds || 0).toFixed(1) }} s</span></div>
       <el-progress :percentage="storagePercent" :show-text="false" :stroke-width="3" />
-      <div class="recording-save-row"><span :class="{ 'has-changes': dirty }">{{ !loaded ? '设置加载中' : dirty ? '尚未保存' : '设置已同步' }}</span><el-button v-if="dirty" text :disabled="saving" @click="emit('reset')">撤销</el-button><el-button type="primary" :loading="saving" :disabled="!loaded || !dirty || blocked" @click="emit('save')"><Save :size="14" />保存并应用</el-button></div>
+      <p class="setting-hint">保存并应用后，本机重启和代码更新会继续使用已保存配置。恢复默认只回填此处的监测与录制参数，点击保存后才生效。</p>
+      <div class="recording-save-row"><span :class="{ 'has-changes': dirty }">{{ !loaded ? '设置加载中' : dirty ? '尚未保存' : '已保存到本机' }}</span><el-button text :disabled="!loaded || saving" @click="emit('restore-defaults')">恢复默认配置</el-button><el-button v-if="dirty" text :disabled="saving" @click="emit('reset')">恢复上次保存</el-button><el-button type="primary" :loading="saving" :disabled="!loaded || !dirty || blocked" @click="emit('save')"><Save :size="14" />保存并应用</el-button></div>
       <RouterLink class="recording-library-link" to="/recordings"><Video :size="15" />查看已保存的每轮录像 <span>→</span></RouterLink>
     </div>
   </article>

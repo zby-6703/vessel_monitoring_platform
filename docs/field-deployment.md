@@ -50,19 +50,19 @@
 
 ## 双击启动与关闭
 
-完成上述首次部署后，使用项目根目录的两个脚本（可为它们创建桌面快捷方式）：
+完成上述首次部署后，双击项目根目录的 `platform.bat`（可为它创建桌面快捷方式）。同一个文件提供菜单，操作结束后返回菜单：
 
-- `start-platform.bat`：以现场模式启动后端和已构建前端，成功后自动打开 `http://127.0.0.1:5173`。关闭脚本窗口不会停止平台。摄像头采集仍在页面手动开启。
-- `stop-platform.bat`：先停止本机采集，等待录像收尾和机位恢复，再关闭前后端。若收尾失败，保留服务运行并显示错误；已停止时可重复执行。关闭浏览器不会停止后端采集，应使用此脚本关闭平台。
+- 按 `1` 开启：以现场模式启动后端和已构建前端，成功后自动用默认浏览器打开 `http://127.0.0.1:5173`，同时显示网址，便于手动访问。摄像头采集仍在页面手动开启。
+- 按 `2` 关闭：先停止本机采集，等待录像收尾和机位恢复，再关闭前后端。若收尾失败，保留服务运行并显示错误；已停止时可重复执行。
+- 按 `0` 退出窗口：平台继续运行。关闭浏览器同样不会停止后端采集，需要关闭平台时重新运行此文件并按 `2`。
 
 默认环境为 `Train`。脚本会从 `CONDA_EXE`、PATH、Windows Python 注册表和常见用户/公共安装目录查找 Conda，无需先打开 Anaconda Prompt。自定义位置无法自动查找到时，可在命令提示符中明确传参：
 
 ```bat
-start-platform.bat -CondaExe "D:\your Miniconda\Scripts\conda.exe" -Environment Train
-stop-platform.bat -CondaExe "D:\your Miniconda\Scripts\conda.exe" -Environment Train
+platform.bat -CondaExe "D:\your Miniconda\Scripts\conda.exe" -Environment Train
 ```
 
-也可在桌面快捷方式的“目标”中给 `.bat` 追加这些参数。脚本根据自身位置查找项目，可从其他工作目录运行；不要单独复制 `.bat` 离开项目。首次运行不会自动安装依赖或下载模型，缺少环境时先完成 `setup.ps1`。窗口默认保留运行结果，按任意键关闭；自动化调用可设置 `VESSELSIGHT_NO_PAUSE=1`，启动时不需打开浏览器可另设置 `VESSELSIGHT_NO_BROWSER=1`。成功退出码为 0，失败保留非零退出码。
+也可在桌面快捷方式的“目标”中给 `.bat` 追加这些参数，开启和关闭均使用同一组环境设置。脚本根据自身位置查找项目，可从其他工作目录运行；不要单独复制 `.bat` 离开项目。首次运行不会自动安装依赖或下载模型，缺少环境时先完成 `setup.ps1`。窗口保留运行结果，按任意键返回菜单；调试时可设置 `VESSELSIGHT_NO_PAUSE=1` 跳过暂停，不需打开浏览器可另设置 `VESSELSIGHT_NO_BROWSER=1`。操作失败会显示错误和非零退出码，再返回菜单。
 
 ## 日常更新
 
@@ -74,7 +74,7 @@ stop-platform.bat -CondaExe "D:\your Miniconda\Scripts\conda.exe" -Environment T
 
 更新完成后刷新浏览器，再手动启动采集，确保页面与后端使用同一版本参数。镜头故障时原机位仍由本机保留，设备恢复后的采集初始化会先尝试归位。
 
-手动拉取也可以：先运行 `stop-platform.bat`，再依次执行 `git pull --ff-only`、`setup.ps1` 和 `start-platform.bat`。只改代码、共享参数而依赖未变化时，可用 `setup.ps1 -SkipDependencies` 复用现有依赖并重建前端。
+手动拉取也可以：先运行 `platform.bat` 并按 `2` 关闭、按 `0` 退出窗口，再依次执行 `git pull --ff-only`、`setup.ps1`；最后运行 `platform.bat` 并按 `1` 开启。只改代码、共享参数而依赖未变化时，可用 `setup.ps1 -SkipDependencies` 复用现有依赖并重建前端。
 
 ## 共享配置与本机配置
 

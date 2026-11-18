@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -96,6 +97,10 @@ class ClipWriter:
 
 class RecordingManager(OpticalCycleMixin):
     BUFFER_BYTES = 64 * 1024**2
+    STORAGE_ERROR = "通行视频文件写入失败，请检查系统状态中的存储目录和磁盘空间"
+    STORAGE_LIMIT_ERROR = "录像存储空间不足，已停止录制；请释放空间或调整配额后保存设置"
+    MEDIA_FILES = ("thumbnail.jpg", *(f"{kind}{suffix}.mp4" for kind in ("cycle", "original", "focused")
+                                      for suffix in ("", ".capture", ".encoding")))
 
     def __init__(self, root: Path, *, site_profile_path: Path | None = None):
         self.root = Path(root).resolve()
@@ -103,6 +108,15 @@ class RecordingManager(OpticalCycleMixin):
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="passage-encoder")
         self.settings_path = self.root / "settings.json"
+        self.storage_path = self.root / "storage.json"
+        self.media_root = self.root
+        self.storage_config_error = None
+        if self.storage_path.is_file():
+            try:
+                stored = json.loads(self.storage_path.read_text(encoding="utf-8"))
+                self.media_root = self._absolute_storage_path(stored["path"])
+            except (OSError, ValueError, KeyError, TypeError):
+                self.storage_config_error = "存储路径配置无法读取，请重新保存"
         self.site_profile_path = Path(site_profile_path).resolve() if site_profile_path else None
         self.settings = RecordingSettings()
         self.error: str | None = None
@@ -146,6 +160,8 @@ class RecordingManager(OpticalCycleMixin):
                     continue
                 if not isinstance(item["ship_names"], list) or not isinstance(item["track_ids"], list):
                     continue
+                if "media_root" in item:
+                    item["media_root"] = str(self._absolute_storage_path(item["media_root"]))
                 self.catalog[item["id"]] = item
                 if item["status"] in {"recording", "processing"}:
                     item.update(status="processing", reason="process_restarted", ended_at=item.get("ended_at") or datetime.now(timezone.utc).isoformat())
@@ -157,6 +173,56 @@ class RecordingManager(OpticalCycleMixin):
         # before any worker is allowed to iterate it.
         for recording_id in recover:
             self.executor.submit(self._encode, recording_id, "interrupted")
+
+    @staticmethod
+    def _absolute_storage_path(value: str) -> Path:
+        if not isinstance(value, str) or not value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("请输入有效的绝对目录")
+        path = Path(value.strip())
+        if not path.is_absolute() or (os.name == "nt" and not re.fullmatch(r"[A-Za-z]:", path.drive)):
+            raise ValueError("请输入录像电脑上的绝对目录，例如 D:\\船舶录像" if os.name == "nt" else "请输入录像服务器上的绝对目录")
+        return Path(os.path.abspath(path))
+
+    def get_storage(self) -> dict:
+        with self.lock:
+            try:
+                available = self.media_root.is_dir()
+            except OSError:
+                available = False
+            return {"path": str(self.media_root), "default_path": str(self.root),
+                    "available": available, "error": self.storage_config_error}
+
+    def update_storage(self, value: str | None) -> dict:
+        path = self.root if value is None else self._absolute_storage_path(value)
+        try:
+            path = self._absolute_storage_path(str(path.resolve()))
+            inside_default = path.relative_to(self.root).parts if path.is_relative_to(self.root) else ()
+            if inside_default and re.fullmatch(r"[a-f0-9]{32}", inside_default[0], re.IGNORECASE):
+                raise ValueError("请选择独立目录，避免把新录像写进已有片段的目录")
+            path.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=path) as probe:
+                probe.write(b"VesselSight")
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("无法写入该目录，请检查磁盘、路径和写入权限") from exc
+        with self.lock:
+            try:
+                _atomic_json(self.storage_path, {"path": str(path)})
+            except OSError as exc:
+                raise ValueError("无法保存本机存储配置，请检查项目目录权限") from exc
+            self.media_root = path
+            self.storage_config_error = None
+            if self.error in {self.STORAGE_ERROR, self.STORAGE_LIMIT_ERROR}:
+                self.error = None
+                if self.phase == "error" and self._control_future is None and self.active is None:
+                    self._optical_session = False
+                    self._cycle_halt = False
+                    self._cycle_policy = None
+                    self._phase("overview")
+            return self.get_storage()
+
+    def _media_directory(self, item: dict) -> Path:
+        root = Path(item["media_root"]) if "media_root" in item else self.root
+        return root / item["id"]
 
     def get_settings(self) -> dict:
         with self.lock:
@@ -247,6 +313,8 @@ class RecordingManager(OpticalCycleMixin):
         with self.lock:
             try:
                 self._process_frame(image, camera_id, session_id, source_name, fps, timestamp, vessels, source_type, observation_context)
+            except OSError:
+                self.fail(self.STORAGE_ERROR)
             except Exception:
                 # Avoid leaking an RTSP URL or filesystem internals into the UI.
                 self.fail("录像写入失败，请检查磁盘空间和视频编码器")
@@ -343,7 +411,6 @@ class RecordingManager(OpticalCycleMixin):
     def _start(self, image: np.ndarray, fps: float, timestamp: float, single: bool = False):
         recording_id = uuid.uuid4().hex
         directory = self.root / recording_id
-        directory.mkdir()
         start = self.buffer[0][0] if self.buffer else timestamp
         started_at = datetime.now(timezone.utc) - timedelta(seconds=timestamp - start)
         saved_settings = self.settings.model_dump() if single else self.settings.model_copy(update={"recording_mode": "passage", "zoom_factor": min(8., self.settings.zoom_factor)}).model_dump()
@@ -353,10 +420,16 @@ class RecordingManager(OpticalCycleMixin):
                 "source_fps": fps, "source_width": int(image.shape[1]), "source_height": int(image.shape[0]), "error": None}
         item["source_start_seconds"] = start
         item["source_end_seconds"] = start
+        if self.media_root != self.root:
+            item["media_root"] = str(self.media_root)
+        media_directory = self._media_directory(item)
+        media_directory.mkdir()
+        if media_directory != directory:
+            directory.mkdir()
         self.catalog[recording_id] = item
         _atomic_json(directory / "manifest.json", item)
         try:
-            writer = ClipWriter(directory, image, fps, single=True) if single else ClipWriter(directory, image, fps)
+            writer = ClipWriter(media_directory, image, fps, single=True) if single else ClipWriter(media_directory, image, fps)
         except Exception:
             item.update(status="failed", reason="writer_failed", error="无法创建视频编码器")
             _atomic_json(directory / "manifest.json", item)
@@ -364,8 +437,10 @@ class RecordingManager(OpticalCycleMixin):
         self.active = {"id": recording_id, "writer": writer, "start": start, "fps": fps, "frames": 0, "shape": image.shape[:2], "previous": None, "previous_focus": None, "persisted_at": time.monotonic()}
         record_event("recording_started", recording_id=recording_id, camera_id=self.camera_id,
             session_id=self.session_id, recording_mode=item["recording_mode"])
-        if not cv2.imwrite(str(directory / "thumbnail.jpg"), cv2.resize(image, (480, max(2, round(image.shape[0] * 480 / image.shape[1]))))):
+        ok, thumbnail = cv2.imencode(".jpg", cv2.resize(image, (480, max(2, round(image.shape[0] * 480 / image.shape[1])))))
+        if not ok:
             raise RuntimeError("cannot save thumbnail")
+        (media_directory / "thumbnail.jpg").write_bytes(thumbnail.tobytes())
 
     def _write_frame(self, image: np.ndarray, timestamp: float):
         clip = self.active
@@ -432,13 +507,17 @@ class RecordingManager(OpticalCycleMixin):
             self.first_seen = None
 
     def _encode(self, recording_id: str, final_status: str):
-        directory = self.root / recording_id
+        with self.lock:
+            item = self.catalog[recording_id]
+            directory = self._media_directory(item)
+            kinds = ("cycle",) if item.get("recording_mode") == "optical_cycle" else ("original", "focused")
         error = None
         try:
+            if directory.resolve() != directory:
+                raise ValueError("invalid media directory")
             ffmpeg = shutil.which("ffmpeg")
             if not ffmpeg:
                 raise RuntimeError("ffmpeg unavailable")
-            kinds = ("cycle",) if self.catalog[recording_id].get("recording_mode") == "optical_cycle" else ("original", "focused")
             for kind in kinds:
                 raw = directory / f"{kind}.capture.mp4"
                 target = directory / f"{kind}.mp4"
@@ -457,24 +536,31 @@ class RecordingManager(OpticalCycleMixin):
             if item is None:
                 return
             item.update(status="failed" if error else final_status, error=error)
-            item["bytes"] = sum(p.stat().st_size for p in directory.iterdir() if p.is_file())
-            _atomic_json(directory / "manifest.json", item)
+            item["bytes"] = self._directory_bytes(directory)
+            _atomic_json(self.root / recording_id / "manifest.json", item)
             record_event("recording_failed" if error else "recording_finished",
                 recording_id=recording_id, camera_id=item.get("camera_id"),
                 session_id=item.get("session_id"), recording_mode=item.get("recording_mode"),
                 reason="encoding_failed" if error else item.get("reason"))
             self._maintenance(force=True)
 
-    def _storage_bytes(self) -> int:
+    @staticmethod
+    def _directory_bytes(directory: Path) -> int:
         total = 0
-        for path in self.root.glob("*/*"):
-            try:
+        try:
+            for path in directory.iterdir():
                 if path.is_file():
-                    total += path.stat().st_size
-            except FileNotFoundError:
-                # An encoder can atomically replace/remove its temporary file.
-                continue
+                    try:
+                        total += path.stat().st_size
+                    except FileNotFoundError:
+                        # Encoding can replace temporary files during a scan.
+                        continue
+        except OSError:
+            pass
         return total
+
+    def _storage_bytes(self) -> int:
+        return sum(self._directory_bytes(self._media_directory(item)) for item in self.catalog.values())
 
     def _maintenance(self, force: bool = False):
         if not force and time.monotonic() - self.last_maintenance < 5:
@@ -499,13 +585,22 @@ class RecordingManager(OpticalCycleMixin):
                 except (ValueError, OSError):
                     continue
                 total = self._storage_bytes()
-        if self.active and (total > quota or shutil.disk_usage(self.root).free < 128 * 1024**2):
-            if self._optical_session:
-                self._halt_optical("storage_limit")
-            else:
-                self._finish("storage_limit")
-            self.error = "录像存储空间不足，已停止录制；请释放空间或调整配额后保存设置"
-            self._clear_buffer()
+        if not self.active:
+            return
+        directory = self._media_directory(self.catalog[self.active["id"]])
+        try:
+            free = shutil.disk_usage(directory.parent).free
+        except OSError:
+            self.fail(self.STORAGE_ERROR)
+            return
+        if total <= quota and free >= 128 * 1024**2:
+            return
+        if self._optical_session:
+            self._halt_optical("storage_limit")
+        else:
+            self._finish("storage_limit")
+        self.error = self.STORAGE_LIMIT_ERROR
+        self._clear_buffer()
 
     def status(self) -> dict:
         with self.lock:
@@ -539,7 +634,8 @@ class RecordingManager(OpticalCycleMixin):
 
     def _public_item(self, item: dict) -> dict:
         value = dict(item)
-        directory = self.root / item["id"]
+        value.pop("media_root", None)
+        directory = self._media_directory(item)
         playable = item["status"] in {"completed", "interrupted"}
         for kind, suffix in (("original", "mp4"), ("focused", "mp4"), ("thumbnail", "jpg")):
             value[f"{kind}_url"] = f"/api/recordings/{item['id']}/{kind}" if (kind == "thumbnail" or playable) and (directory / f"{kind}.{suffix}").is_file() else None
@@ -565,12 +661,24 @@ class RecordingManager(OpticalCycleMixin):
             return {"items": [self._public_item(i) for i in items[(page - 1) * page_size:page * page_size]], "total": len(items), "page": page, "page_size": page_size}
 
     def _delete(self, recording_id: str):
-        if recording_id in self.analysis_pins or self.catalog.get(recording_id, {}).get("analysis", {}).get("status") in {"queued", "running"}:
+        item = self.catalog[recording_id]
+        if recording_id in self.analysis_pins or (item.get("analysis") or {}).get("status") in {"queued", "running"}:
             raise ValueError("录像正在离线分析，完成或取消作业后再删除")
         # IDs come only from the validated in-memory catalog, never a raw path.
-        target = (self.root / recording_id).resolve()
-        if target.parent != self.root or not re.fullmatch(r"[a-f0-9]{32}", recording_id):
+        target = self.root / recording_id
+        directory = self._media_directory(item)
+        if not re.fullmatch(r"[a-f0-9]{32}", recording_id) or target.resolve() != target or directory.resolve() != directory:
             raise ValueError("invalid recording id")
+        if directory != target:
+            if not directory.parent.is_dir():
+                raise ValueError("此录像的存储目录暂不可用，请恢复连接后再删除")
+            try:
+                for name in self.MEDIA_FILES:
+                    (directory / name).unlink(missing_ok=True)
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError as exc:
+                raise ValueError("录像文件正在使用或无法删除，请关闭播放/下载后重试") from exc
         if target.exists():
             try:
                 shutil.rmtree(target)
@@ -627,16 +735,21 @@ class RecordingManager(OpticalCycleMixin):
 
     def media_path(self, recording_id: str, kind: str) -> Path:
         with self.lock:
-            if recording_id not in self.catalog or kind not in {"original", "focused", "thumbnail", "cycle"}:
+            item = self.catalog.get(recording_id)
+            if item is None or kind not in {"original", "focused", "thumbnail", "cycle"}:
                 raise FileNotFoundError(recording_id)
-            if kind != "thumbnail" and self.catalog[recording_id]["status"] not in {"completed", "interrupted"}:
+            if kind != "thumbnail" and item["status"] not in {"completed", "interrupted"}:
                 raise FileNotFoundError(recording_id)
-            if kind == "original" and self.catalog[recording_id].get("recording_mode") == "optical_cycle":
+            if kind == "original" and item.get("recording_mode") == "optical_cycle":
                 kind = "cycle"
-            path = (self.root / recording_id / f"{kind}.{'jpg' if kind == 'thumbnail' else 'mp4'}").resolve()
-            if not path.is_relative_to(self.root) or not path.is_file():
-                raise FileNotFoundError(recording_id)
-            return path
+            directory = self._media_directory(item)
+            path = directory / f"{kind}.{'jpg' if kind == 'thumbnail' else 'mp4'}"
+            try:
+                if path.resolve() == path and path.is_file():
+                    return path
+            except (OSError, RuntimeError):
+                pass
+            raise FileNotFoundError(recording_id)
 
 
 recording_manager = RecordingManager(get_settings().result_root / "passages", site_profile_path=get_settings().site_profile_path)

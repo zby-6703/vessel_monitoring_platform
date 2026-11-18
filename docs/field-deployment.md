@@ -84,12 +84,15 @@ platform.bat -CondaExe "D:\your Miniconda\Scripts\conda.exe" -Environment Train
 | --- | --- | --- |
 | 新电脑初始参数、手动重置时的默认参数、同一镜头光学标定 | `config/river-monitoring.json` | 随 Git 拉取；有效本机监测配置始终优先 |
 | 本机保存并应用的监测/录制/跟随参数 | `data/results/passages/settings.json` | 每次启动读取；重启和更新代码都不自动覆盖 |
+| 本机通行视频存储路径 | `data/results/passages/storage.json` | 在系统状态的“通行视频存储”中保存，重启后继续使用 |
 | 账号密码、设备地址、端口、取流地址、CPU/GPU 与本机路径 | `.env`、`data/camera_profile.json`、`data/model_settings.json` | 每台电脑单独保存，Git 忽略 |
 | 模型文件名、尺寸和 SHA-256 | `config/model-files.json` | 随 Git；检查迁移模型是否匹配 |
 | 模型权重及 OCR 字典 | `models/` | 使用独立模型包复制 |
 | 数据库、录像、任务、水平起始机位 | `data/` | 本机保留，不从另一台电脑整目录覆盖 |
 
 `.env` 中 `SITE_PROFILE=./config/river-monitoring.json` 提供现场默认策略与同一镜头光学标定。没有本机策略文件时，以现场默认策略初始化；已有有效 `data/results/passages/settings.json` 时，始终使用本机最新保存的配置，即使共享文件更新或旧的共享版本标记缺失，也不会重新套用默认参数。首次初始化的版本信息保存在同目录 `settings.shared-profile.json`；本机策略损坏时才允许从默认策略恢复。设置 `SITE_PROFILE=` 使用通用默认策略，本机保存配置仍优先。
+
+通行视频默认存到 `data/results/passages`。在“系统状态 → 通行视频存储”输入运行后端的电脑上的绝对目录，例如 `D:\船舶录像`，平台会检查写入权限并保存。新路径从下一段录像生效，历史录像可以继续播放和离线分析。录像索引留在原 `passages` 目录，MP4 与缩略图存入各片段创建时所选的目录。保留天数和总配额仍适用于通行视频列表中的录像。
 
 实时监测中的“循环录制”和“识别与筛选”分别保存参数。“恢复默认配置”回填当前页签的现场默认值，点击“保存并应用”后生效。“恢复上次保存”可撤销当前页签的待保存修改。循环录制开关即时生效并单独保存，恢复默认参数时保持当前开关状态。云台、光学变焦和手动对焦在同级“手动镜头”页签中操作。
 

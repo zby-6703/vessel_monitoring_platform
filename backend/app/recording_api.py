@@ -39,6 +39,23 @@ def status():
     return recording_manager.status()
 
 
+class RecordingStorageRequest(BaseModel):
+    path: str | None = Field(max_length=4096)
+
+
+@router.get("/api/recording/storage")
+def get_storage():
+    return recording_manager.get_storage()
+
+
+@router.put("/api/recording/storage")
+def save_storage(payload: RecordingStorageRequest):
+    try:
+        return recording_manager.update_storage(payload.path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/api/recording/events")
 def events(limit: int = Query(50, ge=1, le=100)):
     return {"items": recent_events(limit)}

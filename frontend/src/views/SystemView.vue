@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { AlertCircle, CheckCircle2, CircleOff, Cpu, Database, RadioTower, RefreshCw, Server, Settings2 } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, CircleOff, Cpu, Database, FolderOpen, RadioTower, RefreshCw, Server, Settings2 } from 'lucide-vue-next'
 import { onMounted, ref } from 'vue'
-import { apiError, getCameraProfiles, selectCameraProfile, getHealth, getModelSettings, getStreams, resetModelSettings, updateModelSettings, type CameraProfiles, type Health, type ModelSettings, type StreamItem } from '../api'
+import { apiError, getCameraProfiles, selectCameraProfile, getHealth, getModelSettings, getRecordingStorage, getStreams, resetModelSettings, updateModelSettings, updateRecordingStorage, type CameraProfiles, type Health, type ModelSettings, type RecordingStorage, type StreamItem } from '../api'
 
 const health = ref<Health | null>(null)
 const stream = ref<StreamItem | null>(null)
@@ -16,6 +16,10 @@ const profiles = ref<CameraProfiles | null>(null)
 const profileToken = ref('')
 const profilesBusy = ref(false)
 const profileError = ref('')
+const recordingStorage = ref<RecordingStorage | null>(null)
+const storagePath = ref('')
+const storageBusy = ref(false)
+const storageError = ref('')
 function profileLabel(item: CameraProfiles['profiles'][number]) {
   const channel = /MainStream/i.test(item.name) ? '主码流' : /SubStream(\d+)/i.test(item.name) ? `辅助流 ${item.name.match(/SubStream(\d+)/i)?.[1]}` : item.name
   return `${channel} · ${item.token} · ${item.width}×${item.height} · ${item.encoding} · ${item.frame_rate_limit || '--'} fps`
@@ -44,11 +48,29 @@ const modelGroups = [
 async function load() {
   loading.value = true
   try {
-    const [healthResult, streamsResult, settingsResult] = await Promise.allSettled([getHealth(), getStreams(), getModelSettings()])
+    const [healthResult, streamsResult, settingsResult, storageResult] = await Promise.allSettled([getHealth(), getStreams(), getModelSettings(), getRecordingStorage()])
     if (healthResult.status === 'fulfilled') health.value = healthResult.value
     if (streamsResult.status === 'fulfilled') stream.value = streamsResult.value[0] || null
     if (settingsResult.status === 'fulfilled') modelSettings.value = settingsResult.value
+    if (storageResult.status === 'fulfilled') {
+      if (!recordingStorage.value || storagePath.value === recordingStorage.value.path) storagePath.value = storageResult.value.path
+      recordingStorage.value = storageResult.value
+      storageError.value = ''
+    } else {
+      storageError.value = apiError(storageResult.reason, '无法读取录像目录')
+    }
   } finally { loading.value = false }
+}
+async function saveStorage(path: string | null) {
+  if (storageBusy.value) return
+  storageBusy.value = true
+  storageError.value = ''
+  try {
+    recordingStorage.value = await updateRecordingStorage(path)
+    storagePath.value = recordingStorage.value.path
+    ElMessage.success('通行视频存储路径已保存，从下一段录像生效')
+  } catch (error) { storageError.value = apiError(error, '保存录像目录失败') }
+  finally { storageBusy.value = false }
 }
 function openSettings() {
   modelForm.value = { ...(modelSettings.value?.values || {}) }
@@ -95,6 +117,24 @@ onMounted(load)
       <article class="panel stream-panel"><header class="panel-header"><div><span class="section-kicker">媒体流配置</span><h2>实时监测点</h2></div><RadioTower :size="19" /></header><div class="stream-card"><div class="stream-head"><span class="status-dot" :class="stream?.status === 'configured' ? 'online' : 'offline'"></span><div><strong>{{ stream?.name || '未配置监测点' }}</strong><span>{{ stream?.id || '--' }}</span></div><span class="risk-label" :class="stream?.status === 'configured' ? 'normal' : 'warning'">{{ stream?.status === 'configured' ? '已配置' : '未配置' }}</span></div><dl><div><dt>播放协议</dt><dd>{{ stream?.protocol || '--' }}</dd></div><div><dt>播放地址</dt><dd class="stream-url" :title="stream?.play_url || ''">{{ stream?.play_url || '请设置 LIVE_STREAM_URL' }}</dd></div></dl><p class="config-note">平台只报告配置状态，不虚构摄像头在线性、延迟、分辨率或推理吞吐。</p></div></article>
     </section>
 
+    <section class="panel recording-storage-panel" id="recording-storage">
+      <header class="panel-header"><h2>通行视频存储</h2><FolderOpen :size="19" /></header>
+      <div class="recording-storage-body">
+        <p v-if="recordingStorage" class="recording-storage-current">当前目录 <code>{{ recordingStorage.path }}</code></p>
+        <el-form label-position="top" :disabled="storageBusy" @submit.prevent="saveStorage(storagePath.trim())">
+          <el-form-item label="录像电脑上的绝对目录" for="recording-storage-path">
+            <el-input id="recording-storage-path" v-model="storagePath" placeholder="例如 D:\船舶录像" />
+          </el-form-item>
+          <div class="recording-storage-actions">
+            <el-button type="primary" native-type="submit" :loading="storageBusy" :disabled="!storagePath.trim() || (storagePath.trim() === recordingStorage?.path && recordingStorage?.available && !recordingStorage?.error)">保存路径</el-button>
+            <el-button :disabled="!recordingStorage || (recordingStorage.path === recordingStorage.default_path && !recordingStorage.error)" @click="saveStorage(null)">恢复默认路径</el-button>
+          </div>
+        </el-form>
+        <p class="config-note">保存后从下一段录像生效。已有录像留在原目录，仍可在通行视频中回看和分析。</p>
+        <p v-if="storageError || recordingStorage?.error || recordingStorage?.available === false" class="error-text" role="alert">{{ storageError || recordingStorage?.error || '当前录像目录不可用，请检查磁盘连接或更换路径。' }}</p>
+      </div>
+    </section>
+
     <section class="panel camera-profile-panel">
       <header class="panel-header"><div><span class="section-kicker">摄像头频道</span><h2>主流 / 辅助流选择</h2></div><el-button :loading="profilesBusy" @click="loadProfiles"><RefreshCw :size="15" />读取设备频道</el-button></header>
       <div class="camera-profile-body">
@@ -127,4 +167,11 @@ onMounted(load)
 
 <style scoped>
 .camera-profile-panel { margin-top: 16px; }.camera-profile-body { padding: 0 18px 18px; }.profile-select { width: min(520px, 75vw); }.error-text { color: var(--el-color-danger); }
+.recording-storage-panel { margin-top: 16px; }
+.recording-storage-body { padding: 0 18px 18px; }
+.recording-storage-current { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.recording-storage-current code { overflow-wrap: anywhere; user-select: all; }
+.recording-storage-body .el-form { max-width: 760px; }
+.recording-storage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.recording-storage-actions .el-button { margin-left: 0; }
 </style>

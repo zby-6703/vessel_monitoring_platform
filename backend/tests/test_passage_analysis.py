@@ -13,16 +13,23 @@ from app import api, recording_api
 
 
 @pytest.fixture
-def archive(tmp_path):
+def archive(tmp_path, request):
     recording = RecordingManager(tmp_path / "passages")
+    custom_storage = getattr(request, "param", False)
+    if custom_storage:
+        recording.update_storage(str(tmp_path / "自定义录像"))
     jobs = JobManager(replace(Settings(), result_root=tmp_path / "results", upload_root=tmp_path / "uploads"))
     jobs.bind_recordings(recording)
     recording_id = "a" * 32
     directory = recording.root / recording_id
     directory.mkdir()
-    (directory / "cycle.mp4").write_bytes(b"test immutable video")
+    media_directory = recording.media_root / recording_id
+    media_directory.mkdir(exist_ok=True)
+    (media_directory / "cycle.mp4").write_bytes(b"test immutable video")
     item = {"id": recording_id, "status": "completed", "recording_mode": "optical_cycle", "started_at": datetime.now(timezone.utc).isoformat(),
             "camera_id": "river", "source_name": "river camera", "ship_names": [], "track_ids": [7], "bytes": 20}
+    if custom_storage:
+        item["media_root"] = str(recording.media_root)
     recording.catalog[recording_id] = item
     _atomic_json(directory / "manifest.json", item)
     yield recording, jobs, recording_id
@@ -41,8 +48,10 @@ class GoodPipeline:
                 "csv_rows": [{"instance_id": 1, "recognized_zh": "测试船88", "recognized_en": "TEST88", "draft_depth_m": 2.6, "status": "pending_review"}]}
 
 
+@pytest.mark.parametrize("archive", [False, True], indirect=True, ids=["default", "custom"])
 def test_recording_analysis_is_full_tracked_idempotent_and_persistent(archive):
     recording, jobs, rid = archive
+    recording.update_storage(str(recording.root.parent / "next-recording"))
     first = jobs.create_from_recording(recording, rid, {"frame_step": 1, "visualize": False})
     assert first["source_recording"]["id"] == rid
     assert jobs.create_from_recording(recording, rid, {})["id"] == first["id"]

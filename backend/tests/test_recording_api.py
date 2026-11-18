@@ -23,7 +23,7 @@ def recording_client(tmp_path, monkeypatch):
     manager.executor.shutdown(wait=True)
 
 
-def create_event(manager: RecordingManager) -> str:
+def start_event(manager: RecordingManager) -> str:
     manager.update_settings({"enabled": True, "min_hits": 1, "pre_roll_seconds": 0})
     image = np.full((80, 128, 3), 100, dtype=np.uint8)
     manager.process_frame(
@@ -40,9 +40,14 @@ def create_event(manager: RecordingManager) -> str:
             "boxes": [{"type": "ship", "xywh": [20, 10, 80, 60], "confidence": .9}],
         }],
     )
+    return manager.active["id"]
+
+
+def create_event(manager: RecordingManager) -> str:
+    recording_id = start_event(manager)
     manager.finish()
     manager.executor.submit(lambda: None).result(timeout=30)
-    return manager.list_recordings()["items"][0]["id"]
+    return recording_id
 
 
 def test_recording_routes_are_registered_in_main_app():
@@ -70,6 +75,59 @@ def test_settings_and_status_are_available_and_partial_settings_persist(recordin
     status = client.get("/api/recording/status")
     assert status.status_code == 200
     assert isinstance(status.json(), dict)
+
+
+def test_storage_switch_applies_to_next_recording_even_after_restart(recording_client):
+    client, manager = recording_client
+    api = "/api/recording/storage"
+    original = manager.root
+    destination = original / "通行 录像"
+    assert client.get(api).json() == {"path": str(original), "default_path": str(original), "available": True, "error": None}
+
+    previous = start_event(manager)
+    assert client.put(api, json={"path": str(destination)}).json()["path"] == str(destination)
+    assert manager.active["id"] == previous
+    manager.finish()
+    manager.executor.submit(lambda: None).result(timeout=30)
+    current = create_event(manager)
+
+    assert manager.media_path(previous, "original").parent == original / previous
+    assert manager.media_path(current, "original").parent == destination / current
+    assert (original / current / "manifest.json").is_file()
+    assert not (original / current / "original.mp4").exists()
+    for recording_id in (previous, current):
+        assert client.get(f"/api/recordings/{recording_id}/original", headers={"Range": "bytes=0-31"}).status_code == 206
+        assert client.get(f"/api/recordings/{recording_id}/thumbnail").status_code == 200
+
+    restored = RecordingManager(original)
+    try:
+        assert restored.get_storage()["path"] == str(destination)
+        assert restored.get_settings() == manager.get_settings()
+        assert restored.media_path(current, "original") == destination / current / "original.mp4"
+        assert restored.media_path(previous, "original") == original / previous / "original.mp4"
+    finally:
+        restored.executor.shutdown(wait=True)
+        restored.control_executor.shutdown(wait=True)
+    assert client.put(api, json={"path": None}).json()["path"] == str(original)
+    assert manager.media_path(current, "original").is_file()
+    unrelated = destination / current / "notes.txt"
+    unrelated.write_text("user file", encoding="utf-8")
+    assert client.delete(f"/api/recordings/{current}").status_code == 200
+    assert unrelated.read_text(encoding="utf-8") == "user file"
+    assert not (destination / current / "original.mp4").exists()
+    assert client.get(f"/api/recordings/{previous}/original", headers={"Range": "bytes=0-31"}).status_code == 206
+
+
+def test_storage_path_rejects_relative_and_unwritable_targets(recording_client):
+    client, manager = recording_client
+    api = "/api/recording/storage"
+    file = manager.root / "not-a-directory"
+    file.write_text("preserve this file", encoding="utf-8")
+    for path in ("../relative", "", str(file)):
+        assert client.put(api, json={"path": path}).status_code == 422
+    assert client.get(api).json()["path"] == str(manager.root)
+    assert not manager.storage_path.exists()
+    assert file.read_text(encoding="utf-8") == "preserve this file"
 
 
 def test_default_settings_endpoint_is_a_read_only_preview(recording_client):

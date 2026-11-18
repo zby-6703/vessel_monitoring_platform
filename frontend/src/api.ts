@@ -352,6 +352,9 @@ export function startRegionFocus(region: FocusRegion) { return api.post<FocusSta
 export function stopRegionFocus() { return api.post<FocusStatus>('/camera/focus/stop').then(({ data }) => data) }
 
 export function getRecordingSettings() { return api.get<RecordingSettings>('/recording/settings').then(({ data }) => data) }
+export interface RecordingStorage { path: string; default_path: string; available: boolean; error: string | null }
+export function getRecordingStorage() { return api.get<RecordingStorage>('/recording/storage').then(({ data }) => data) }
+export function updateRecordingStorage(path: string | null) { return api.put<RecordingStorage>('/recording/storage', { path }).then(({ data }) => data) }
 export function getDefaultRecordingSettings() { return api.get<RecordingSettings>('/recording/settings/defaults').then(({ data }) => data) }
 export function updateRecordingSettings(settings: Partial<RecordingSettings>) { return api.put<RecordingSettings>('/recording/settings', settings).then(({ data }) => data) }
 export function getRecordingStatus() { return api.get<RecordingStatus>('/recording/status').then(({ data }) => data) }

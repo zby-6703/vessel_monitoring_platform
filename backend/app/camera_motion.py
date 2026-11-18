@@ -96,8 +96,13 @@ class CameraMotionMixin:
         finally:
             self._request(settings, self.PTZ, "Stop", profile + "<t:PanTilt>true</t:PanTilt><t:Zoom>false</t:Zoom>")
 
+    def _read_ptz_status(self, settings):
+        return self._request(settings, self.PTZ, "GetStatus", f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
+
     def _pan_position(self, settings):
-        doc = self._request(settings, self.PTZ, "GetStatus", f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
+        return self._parse_pan_position(self._read_ptz_status(settings))
+
+    def _parse_pan_position(self, doc):
         pan = doc.find(f".//{{{self.SCHEMA}}}Position/{{{self.SCHEMA}}}PanTilt")
         if pan is None or doc.findtext(f".//{{{self.SCHEMA}}}MoveStatus/{{{self.SCHEMA}}}PanTilt") != "IDLE":
             raise ValueError("无法确认云台停止及实际位置")

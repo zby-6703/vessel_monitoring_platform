@@ -13,7 +13,8 @@ from app.live_capture import OnvifControl
 @pytest.fixture
 def device(tmp_path, monkeypatch):
     settings = replace(Settings(), camera_onvif_ptz_url="http://camera/ptz", camera_onvif_source_token="sensor",
-        camera_onvif_ptz_configuration_token="config", camera_onvif_zoom_timeout=2)
+        camera_onvif_ptz_configuration_token="config", camera_onvif_zoom_timeout=2,
+        camera_onvif_zoom_calibration='{"1": 0.1, "3": 0.3}')
     monkeypatch.setattr(horizontal_follow, "get_effective_settings", lambda: settings)
     monkeypatch.setattr(horizontal_follow, "PLATFORM_ROOT", tmp_path)
     control = OnvifControl()
@@ -23,7 +24,15 @@ def device(tmp_path, monkeypatch):
     calls = []
     control.motion_options = lambda: options
     control._pan_position = lambda settings: dict(state)
-    control.read_magnification = lambda: 1.
+    control._zoom_options = lambda settings: {"min": 0, "max": 1, "space": "zoom"}
+    def feedback(settings):
+        zoom = state.get("zoom", .1)
+        movement = state.get("zoom_movement", "IDLE")
+        return ET.fromstring(f'<Status xmlns:tt="{control.SCHEMA}"><tt:Position>'
+            f'<tt:PanTilt x="{state["x"]}" y="{state["y"]}" space="{state["space"]}"/>'
+            f'<tt:Zoom x="{zoom}" space="zoom"/></tt:Position>'
+            f'<tt:MoveStatus><tt:PanTilt>IDLE</tt:PanTilt><tt:Zoom>{movement}</tt:Zoom></tt:MoveStatus></Status>')
+    control._read_ptz_status = feedback
     def request(settings, ns, action, body):
         xml = ET.fromstring(f'<root xmlns:t="{control.PTZ}" xmlns:tt="{control.SCHEMA}">{body}</root>')
         pan = xml.find(f'.//{{{control.SCHEMA}}}PanTilt')
@@ -84,9 +93,9 @@ def test_travel_limit_stops_further_panning_but_allows_home_return(device):
 
 
 def test_changed_zoom_does_not_dispatch_a_pan_command(device):
-    control, _, calls, _, _ = device
+    control, state, calls, _, _ = device
     control.begin_horizontal_follow()
-    control.read_magnification = lambda: 3
+    state["zoom"] = .3
     with pytest.raises(RuntimeError, match="倍率"):
         control.follow_horizontal(.2, max_travel_ratio=.15, zoom_factor=1)
     assert calls == []
@@ -209,11 +218,31 @@ def test_pan_cancellation_prevents_dispatch(device):
 def test_brief_moving_zoom_feedback_is_waited_out_before_dispatch(device, monkeypatch):
     control, state, calls, _, _ = device
     control.begin_horizontal_follow()
-    replies = iter([None, None, 1., None, 1.])
-    control.read_magnification = lambda: next(replies)
-    monkeypatch.setattr(horizontal_follow.time, "sleep", lambda _: None)
+    replies = iter(["MOVING", "MOVING", "IDLE", "MOVING", "IDLE"])
+    original = control._read_ptz_status
+    def feedback(settings):
+        state["zoom_movement"] = next(replies)
+        return original(settings)
+    control._read_ptz_status = feedback
+    monkeypatch.setattr(control._cancel_move, "wait", lambda _: False)
     assert control.follow_horizontal(.2, max_travel_ratio=.15, zoom_factor=1)["settled"]
     assert sum(action == "RelativeMove" for action, _ in calls) == 1
+
+
+def test_steady_follow_reads_pan_and_zoom_once_before_and_once_after(device, monkeypatch):
+    control, _, calls, _, _ = device
+    control.begin_horizontal_follow()
+    feedback, request = control._read_ptz_status, control._request
+    def reply(settings, namespace, action, body):
+        if action == "GetStatus":
+            calls.append((action, {}))
+            return feedback(settings)
+        return request(settings, namespace, action, body)
+    monkeypatch.setattr(control, "_read_ptz_status", OnvifControl._read_ptz_status.__get__(control))
+    monkeypatch.setattr(control, "_request", reply)
+    result = control.follow_horizontal(.3, max_travel_ratio=.15, zoom_factor=1)
+    assert result["settled"]
+    assert [action for action, _ in calls] == ["GetStatus", "RelativeMove", "GetStatus", "Stop"]
 
 
 def test_observed_native_gain_limits_the_last_step_before_range_boundary(device):

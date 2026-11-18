@@ -66,9 +66,14 @@ def test_detail_waits_for_stern_line_then_pans_only_in_travel_direction(cycle_fa
     for x in (.42, .445):
         h.feed([boat(x, reverse=reverse)], advance=.5); h.drain_control()
     assert calls
+    assert abs(calls[0][0]) == h.manager.settings.pan_step_limit
     assert all((step < 0) == reverse for step, _ in calls)
     assert calls[0][1]["max_travel_ratio"] == (.08 if reverse else .21)
     assert h.controller.calls == [1, 3]
+    events = h.manager.catalog[h.manager.active["id"]]["patrol_events"]
+    trigger = next(event for event in events if event["event"] == "follow_triggered")
+    assert trigger["detail_line"] == pytest.approx(2 / 3 if reverse else 1 / 3)
+    assert (trigger["tail"] <= trigger["detail_line"]) if reverse else (trigger["tail"] >= trigger["detail_line"])
 
 
 @pytest.mark.parametrize("reverse", [False, True])

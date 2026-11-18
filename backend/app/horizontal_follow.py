@@ -48,7 +48,10 @@ class HorizontalFollowMixin:
         raise TimeoutError("等待云台停止及实际位置反馈超时")
 
     def _checked_pan_position(self, settings, options):
-        position = self._pan_position(settings)
+        return self._validate_pan_position(self._pan_position(settings), options)
+
+    @staticmethod
+    def _validate_pan_position(position, options):
         space = options["absolute"]
         if position["space"] and position["space"] != space["space"]:
             raise ValueError("云台反馈与配置坐标空间不一致")
@@ -56,18 +59,22 @@ class HorizontalFollowMixin:
             raise ValueError("云台位置超出声明范围")
         return position
 
-    def _wait_for_follow_zoom(self, settings, expected):
-        deadline = time.monotonic() + settings.camera_onvif_zoom_timeout
-        while time.monotonic() < deadline:
-            if self._cancel_move.is_set():
-                raise RuntimeError("水平跟随已取消")
-            measured = self.read_magnification()
-            if measured == expected:
-                return
-            if measured is not None:
-                raise RuntimeError("其他控制端改变了水平跟随使用的倍率")
-            time.sleep(.1)
-        raise TimeoutError("等待水平跟随倍率及停止反馈超时")
+    def _follow_feedback(self, settings, options, expected):
+        """Confirm idle pan and zoom from the same device response."""
+        document = self._read_ptz_status(settings)
+        try:
+            position = self._parse_pan_position(document)
+        except ValueError as exc:
+            if "无法确认" not in str(exc):
+                raise
+            return None
+        position = self._validate_pan_position(position, options)
+        measured = self._magnification_from_status(settings, self._parse_zoom_status(document))
+        if measured is None:
+            return None
+        if measured != expected:
+            raise RuntimeError("其他控制端改变了水平跟随使用的倍率")
+        return position
 
     def begin_horizontal_follow(self):
         with self.lock:
@@ -109,8 +116,17 @@ class HorizontalFollowMixin:
             if self._cancel_move.is_set():
                 raise RuntimeError("水平跟随已取消")
             options = origin["options"]
-            before = self._wait_for_idle_pan(settings, options)
-            self._wait_for_follow_zoom(settings, zoom_factor)
+            deadline = time.monotonic() + settings.camera_onvif_zoom_timeout
+            before = None
+            while time.monotonic() < deadline and not self._cancel_move.is_set():
+                before = self._follow_feedback(settings, options, zoom_factor)
+                if before is not None:
+                    break
+                self._cancel_move.wait(.1)
+            if self._cancel_move.is_set():
+                raise RuntimeError("水平跟随已取消")
+            if before is None:
+                raise TimeoutError("等待水平跟随倍率及停止反馈超时")
             native = options["absolute"]
             tolerance = (native["x"]["max"] - native["x"]["min"]) * .0005
             movement_epsilon = (native["x"]["max"] - native["x"]["min"]) * .00001
@@ -152,19 +168,16 @@ class HorizontalFollowMixin:
                 while time.monotonic() < deadline:
                     if self._cancel_move.is_set():
                         raise RuntimeError("水平跟随已取消")
-                    try:
-                        after = self._checked_pan_position(settings, options)
-                    except ValueError as exc:
-                        if "无法确认" not in str(exc):
-                            raise
-                    else:
+                    after = self._follow_feedback(settings, options, zoom_factor)
+                    if self._cancel_move.is_set():
+                        raise RuntimeError("水平跟随已取消")
+                    if after is not None:
                         delta = after["x"] - before["x"]
                         if abs(after["y"] - before["y"]) > (native["y"]["max"] - native["y"]["min"]) * .002:
                             raise RuntimeError("云台反馈出现垂直位移，已停止跟随")
                         if delta * fov_x < 0 and abs(delta) > movement_epsilon:
                             raise RuntimeError("云台反馈移动方向不符，已停止跟随")
                         if abs(delta) > movement_epsilon:
-                            self._wait_for_follow_zoom(settings, zoom_factor)
                             origin["last"] = after
                             origin["gain_at_one_x"] = abs(delta / fov_x) * zoom_factor
                             self._save_follow_origin()

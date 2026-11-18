@@ -108,8 +108,19 @@ class OpticalFollowingMixin:
             distance = (tail - boundary) * self._patrol_direction
             if distance < -1e-6:
                 return False
+            # The line is a trigger, not a centring target. Move by the
+            # configured step so the next settled view has room for the stern
+            # to travel during motor feedback and the next inference.
+            room = tail if self._patrol_direction > 0 else 1 - tail
+            # Near an unusually early line, keep the stern inside the frame.
+            magnitude = min(policy.pan_step_limit, room)
+            if magnitude <= 0:
+                return False
+            step = self._patrol_direction * magnitude
+            if not self._patrol_follow_started and self.active:
+                self._patrol_event("follow_triggered", timestamp, tail=tail, detail_line=boundary,
+                                   requested_fov_x=step)
             self._patrol_follow_started = True
-            step = self._patrol_direction * min(policy.pan_step_limit, max(.05, 2 * distance))
         else:
             if abs(center - .5) <= dead_zone:
                 return False
@@ -173,7 +184,8 @@ class OpticalFollowingMixin:
                 if self._pan_limited:
                     item.update(horizontal_limit_reached=True, pan_limit_zoom_factor=factor)
                 item.setdefault("pan_events", []).append({
-                    "source_seconds": self.last_timestamp, "zoom_factor": factor,
+                    "source_seconds": self.last_timestamp, "requested_source_seconds": self._last_pan_adjust,
+                    "zoom_factor": factor,
                     "fov_x": step, "pan_offset": self._pan_offset, "settled": True,
                     "limited": self._pan_limited, "before": result.get("before"), "after": result.get("after")})
             if self._cycle_halt:

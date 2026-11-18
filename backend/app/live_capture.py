@@ -560,10 +560,13 @@ class OnvifControl(HorizontalFollowMixin, CameraMotionMixin):
         settings = get_effective_settings()
         if not self.configured(settings):
             return None
-        calibration = self._calibration(settings)
-        position, movement, reported_space = self._read_zoom_status(settings)
+        return self._magnification_from_status(settings, self._read_zoom_status(settings))
+
+    def _magnification_from_status(self, settings, zoom_status) -> float | None:
+        position, movement, reported_space = zoom_status
         if movement not in {None, "IDLE"}:
             return None
+        calibration = self._calibration(settings)
         options = self._zoom_options(settings)
         self._validate_positions(calibration, options)
         if reported_space and reported_space != options["space"]:
@@ -648,9 +651,7 @@ class OnvifControl(HorizontalFollowMixin, CameraMotionMixin):
             raise ValueError("倍率标定中的镜头位置超出摄像头声明的绝对变焦范围")
 
     def _read_zoom_status(self, settings: Settings) -> tuple[float, str | None, str | None]:
-        document = self._request(settings, self.PTZ, "GetStatus",
-            f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>")
-        return self._parse_zoom_status(document)
+        return self._parse_zoom_status(self._read_ptz_status(settings))
 
     def _parse_zoom_status(self, document: ET.Element) -> tuple[float, str | None, str | None]:
         zoom = document.find(f".//{{{self.SCHEMA}}}Position/{{{self.SCHEMA}}}Zoom")

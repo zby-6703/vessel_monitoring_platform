@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { AlertTriangle, Anchor, Camera, FileSearch, RadioTower, ServerCog, Ship, Square, Upload, Waves } from 'lucide-vue-next'
+import { AlertTriangle, Anchor, Camera, Crosshair, FileSearch, RadioTower, ScanLine, ServerCog, Ship, Square, Upload, Video, Waves } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiError, controlPtz, defaultRecordingSettings, getCameraStatus, getDashboard, getHealth, getLocalPlayback, getPtzStatus, getRealtimeResults, getRecordingSettings, getRecordingStatus, getStreams, selectionReasonLabel, startCamera, startLocalPlayback, stopCamera, stopLocalPlayback, updateRecordingSettings, type CameraStatus, type Health, type LocalPlaybackStatus, type ProcessingSummary, type PtzAction, type PtzStatus, type RecordItem, type RecordingSettings, type RecordingStatus, type Statistics, type StreamItem } from '../api'
 import MetricTile from '../components/MetricTile.vue'
 import RecordingControls from '../components/RecordingControls.vue'
+import RecognitionControls from '../components/RecognitionControls.vue'
+import ManualCameraControls from '../components/ManualCameraControls.vue'
+import MonitoringSettingsActions from '../components/MonitoringSettingsActions.vue'
 import TrendChart from '../components/TrendChart.vue'
 import VideoMonitor from '../components/VideoMonitor.vue'
 import { getFocusStatus, startRegionFocus, stopRegionFocus, type FocusRegion, type FocusStatus } from '../api'
@@ -47,6 +50,32 @@ const recordingStatus = ref<RecordingStatus | null>(null)
 const ptz = ref<PtzStatus | null>(null)
 const ptzBusy = ref(false)
 const savingSettings = ref(false)
+type SettingsSection = 'recording' | 'recognition'
+const monitorTab = ref<SettingsSection | 'manual'>('recording')
+const recognitionKeys = new Set<keyof RecordingSettings>([
+  'enable_ship_name', 'enable_draft', 'target_filter_enabled', 'min_target_height_ratio',
+  'min_target_width_ratio', 'target_confirm_hits', 'target_confirm_seconds', 'target_roi_left',
+  'target_roi_top', 'target_roi_right', 'target_roi_bottom', 'detail_interval_seconds', 'max_detail_targets',
+])
+
+function sectionSettings(values: RecordingSettings, section: SettingsSection): Partial<RecordingSettings> {
+  return Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'enabled' &&
+    recognitionKeys.has(key as keyof RecordingSettings) === (section === 'recognition')))
+}
+
+function sectionDirty(section: SettingsSection) {
+  const saved = savedSettings.value
+  if (!saved) return false
+  const draft = sectionSettings(settings.value, section)
+  return (Object.keys(draft) as (keyof RecordingSettings)[]).some(key => draft[key] !== saved[key])
+}
+
+const recordingDirty = computed(() => sectionDirty('recording'))
+const recognitionDirty = computed(() => sectionDirty('recognition'))
+const recordingValid = computed(() => settings.value.overview_line_left < settings.value.overview_line_right &&
+  settings.value.detail_line_left < settings.value.detail_line_right)
+const recognitionValid = computed(() => settings.value.target_roi_left < settings.value.target_roi_right &&
+  settings.value.target_roi_top < settings.value.target_roi_bottom)
 let socket: WebSocket | null = null
 let reconnectTimer: number | undefined
 let refreshTimer: number | undefined
@@ -54,7 +83,6 @@ let captureTimer: number | undefined
 let statisticsRefreshTimer: number | undefined
 let disposed = false
 let statusRefreshing = false
-const settingsDirty = computed(() => Boolean(savedSettings.value && JSON.stringify(settings.value) !== JSON.stringify(savedSettings.value)))
 const localActive = computed(() => ['starting', 'running'].includes(localPlayback.value?.status || 'idle'))
 const cameraActive = computed(() => ['starting', 'running', 'reconnecting'].includes(camera.value?.status || 'idle'))
 const monitorCameraId = computed(() => sourceMode.value === 'local' ? localPlayback.value?.camera_id || 'local-video' : camera.value?.camera_id || stream.value?.id || 'camera')
@@ -75,7 +103,19 @@ const latestStages = computed(() => {
 })
 const monitorName = computed(() => sourceMode.value === 'local' ? localPlayback.value?.filename || '本地视频验证' : stream.value?.name || '现场摄像头')
 const opticalMode = computed(() => settings.value.recording_mode === 'optical_cycle')
-const opticalReady = computed(() => Boolean(ptz.value?.cycle_supported && (!settings.value.auto_horizontal_follow || ptz.value.horizontal_follow_supported) && ptz.value.magnifications?.some((factor) => factor > 1 && (settings.value.adaptive_zoom_enabled ? factor <= settings.value.max_optical_zoom : Math.abs(factor - settings.value.zoom_factor) < .001))))
+const opticalReady = computed(() => {
+  const policy = savedSettings.value
+  return Boolean(policy && ptz.value?.cycle_supported &&
+    (!policy.auto_horizontal_follow || ptz.value.horizontal_follow_supported) &&
+    ptz.value.magnifications?.some(factor => factor > 1 && (policy.adaptive_zoom_enabled
+      ? factor <= policy.max_optical_zoom
+      : Math.abs(factor - policy.zoom_factor) < .001)))
+})
+const opticalOwned = computed(() => {
+  const status = recordingStatus.value
+  if (['initializing', 'waiting_body', 'panning', 'zooming_in', 'zoomed', 'zooming_out', 'rearming', 'recovering'].includes(status?.phase || '')) return true
+  return cameraActive.value && Boolean(savedSettings.value?.enabled && savedSettings.value.recording_mode === 'optical_cycle')
+})
 const monitorFocusSettings = computed(() => !savedSettings.value ? undefined : sourceMode.value === 'camera' && savedSettings.value.recording_mode === 'optical_cycle' ? savedSettings.value : sourceMode.value === 'local' && opticalMode.value ? { ...settings.value, recording_mode: 'passage' as const, zoom_factor: Math.min(8, settings.value.zoom_factor) } : settings.value)
 const sourceError = computed(() => sourceMode.value === 'local' ? localPlayback.value?.error : camera.value?.error)
 const levelLabel = (level: string) => ({ normal: '正常', warning: '关注', critical: '超载', unknown: '待判定' }[level] || level)
@@ -115,35 +155,62 @@ async function refreshCapture() {
   } finally { statusRefreshing = false }
 }
 async function loadSettings() {
-  const [result, ptzResult] = await Promise.allSettled([getRecordingSettings(), getPtzStatus()])
-  if (result.status === 'fulfilled') { settings.value = { ...defaultRecordingSettings(), ...result.value }; savedSettings.value = { ...settings.value } }
-  else ElMessage.error('自动录制设置加载失败，请刷新重试')
-  if (ptzResult.status === 'fulfilled') ptz.value = ptzResult.value
+  try {
+    const loaded = { ...defaultRecordingSettings(), ...await getRecordingSettings() }
+    savedSettings.value = loaded
+    settings.value = { ...loaded }
+  } catch { ElMessage.error('监测设置加载失败，请刷新重试') }
 }
-async function refreshPtz() {
+async function refreshPtz(reportError = true) {
   ptzBusy.value = true
   try { ptz.value = await getPtzStatus() }
-  catch (error) { ElMessage.error(apiError(error, '镜头能力检查失败')) }
+  catch (error) { if (reportError) ElMessage.error(apiError(error, '镜头能力检查失败')) }
   finally { ptzBusy.value = false }
 }
-async function saveSettings() {
+async function persistSettings(patch: Partial<RecordingSettings>, success: string) {
+  const saved = savedSettings.value
+  if (savingSettings.value || !saved) return
   savingSettings.value = true
   try {
-    const result = await updateRecordingSettings(settings.value)
-    settings.value = { ...defaultRecordingSettings(), ...result }; savedSettings.value = { ...settings.value }
-    await refreshCapture(); ElMessage.success(result.enabled ? '配置已保存并应用，下次启动继续使用本机保存配置' : '配置已保存，自动录制关闭；下次启动继续使用本机保存配置')
-  } catch (error) { ElMessage.error(apiError(error, '录制设置保存失败')) } finally { savingSettings.value = false }
+    const result = { ...defaultRecordingSettings(), ...await updateRecordingSettings(patch) }
+    const untouchedEdits = Object.fromEntries((Object.keys(saved) as (keyof RecordingSettings)[])
+      .filter(key => !(key in patch) && settings.value[key] !== saved[key])
+      .map(key => [key, settings.value[key]]))
+    savedSettings.value = result
+    settings.value = { ...result, ...untouchedEdits }
+    await refreshCapture()
+    ElMessage.success(success)
+  } catch (error) { ElMessage.error(apiError(error, '设置保存失败')) }
+  finally { savingSettings.value = false }
 }
-function resetSettings() { if (savedSettings.value) settings.value = { ...savedSettings.value } }
-async function restoreDefaultSettings() {
+
+function saveSettings(section: SettingsSection) {
+  const label = section === 'recording' ? '录制参数' : '识别与筛选参数'
+  return persistSettings(sectionSettings(settings.value, section), `${label}已保存并应用`)
+}
+
+function toggleRecording(enabled: boolean) {
+  return persistSettings({ enabled }, enabled ? '循环录制已开启' : '循环录制已关闭')
+}
+
+function resetSettings(section: SettingsSection) {
+  if (savedSettings.value) settings.value = { ...settings.value, ...sectionSettings(savedSettings.value, section) }
+}
+
+async function restoreDefaultSettings(section: SettingsSection) {
+  if (savingSettings.value) return
   savingSettings.value = true
   try {
-    settings.value = { ...defaultRecordingSettings(), ...await getDefaultRecordingSettings() }
-    ElMessage.info('已载入默认配置，点击“保存并应用”后生效；可恢复上次保存的配置')
+    const defaults = { ...defaultRecordingSettings(), ...await getDefaultRecordingSettings() }
+    settings.value = { ...settings.value, ...sectionSettings(defaults, section) }
+    ElMessage.info('已载入当前页签的默认参数，点击“保存并应用”后生效')
   } catch (error) { ElMessage.error(apiError(error, '默认配置读取失败，本机保存配置保持不变')) }
   finally { savingSettings.value = false }
 }
-function setFocusCenter(center: { x: number; y: number }) { settings.value = { ...settings.value, center_x: center.x, center_y: center.y } }
+function setFocusCenter(center: { x: number; y: number }) {
+  if (monitorTab.value !== 'recording' || savingSettings.value) return
+  settings.value = { ...settings.value, center_x: center.x, center_y: center.y }
+}
 async function sendPtz(action: PtzAction) {
   ptzBusy.value = true
   try { await controlPtz(action); ElMessage.success(action === 'stop' ? '已停止摄像头运动' : '摄像头控制指令已发送'); await refreshPtz(); await refreshCapture() }
@@ -237,7 +304,7 @@ async function stopLocalVideo() {
   try { localPlayback.value = await stopLocalPlayback(); await refreshCapture() }
   catch (error) { ElMessage.error(apiError(error, '停止本地视频失败')) } finally { sourceBusy.value = false }
 }
-onMounted(() => { load(); loadSettings(); refreshCapture(); connect(); refreshTimer = window.setInterval(() => load(true), 30000); captureTimer = window.setInterval(refreshCapture, 3000) })
+onMounted(() => { load(); loadSettings(); refreshPtz(false); refreshCapture(); connect(); refreshTimer = window.setInterval(() => load(true), 30000); captureTimer = window.setInterval(refreshCapture, 3000) })
 onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnectTimer); clearInterval(refreshTimer); clearInterval(captureTimer); clearTimeout(statisticsRefreshTimer) })
 </script>
 
@@ -268,10 +335,66 @@ onBeforeUnmount(() => { disposed = true; socket?.close(); clearTimeout(reconnect
           <span>{{ sourceMode === 'local' ? '本地视频用于检测与数字录制验证；真实光学变焦循环需要接入摄像头。' : camera?.configured ? '启动采集后进行实时识别；光学循环需先确认镜头绝对变焦能力与倍率标定。' : '在服务端配置 LIVE_CAPTURE_URL 接入摄像头，并配置 ONVIF 光学倍率标定。' }}</span>
           <RouterLink v-if="sourceMode === 'camera'" to="/system">查看系统配置</RouterLink>
         </div>
-        <div class="monitor-footnote"><template v-if="opticalMode && sourceMode === 'camera'"><span>检测后录像并光学放大</span><span>船尾消失后回到 1×</span><span>每轮独立保存，继续检测</span></template><template v-else><span>全景与数字特写同步保存</span><span>本地验证不会驱动镜头</span><span>数字放大不增加原始细节</span></template></div>
+        <div v-if="savedSettings?.enabled && monitorConfigured" class="monitor-footnote">
+          <span>{{ sourceMode === 'camera' && savedSettings.recording_mode === 'optical_cycle' ? '光学循环录制已开启' : '数字取景录制已开启' }}</span>
+        </div>
       </article>
 
-      <RecordingControls v-model="settings" :status="recordingStatus" :saving="savingSettings" :loaded="!!savedSettings" :dirty="settingsDirty" :ptz="ptz" :ptz-busy="ptzBusy" :source-mode="sourceMode" :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status" :processing-summary="liveFrame?.processing_summary" :focus-status="focusStatus" @pick-focus="focusPicking = true" @stop-focus="stopFocus" @focus-region="focusRegion" @save="saveSettings" @reset="resetSettings" @restore-defaults="restoreDefaultSettings" @ptz="sendPtz" @zoom="manualZoom" @refresh-ptz="refreshPtz" />
+      <aside class="panel monitoring-controls" aria-label="实时监测功能">
+        <el-tabs v-model="monitorTab" stretch class="monitoring-tabs" @tab-change="focusPicking = false">
+          <el-tab-pane name="recording">
+            <template #label><span class="monitoring-tab-label"><Video :size="15" />循环录制</span></template>
+            <RecordingControls
+              v-model="settings"
+              :enabled="Boolean(savedSettings?.enabled)"
+              :status="recordingStatus"
+              :saving="savingSettings"
+              :loaded="!!savedSettings"
+              :dirty="recordingDirty"
+              :ptz="ptz"
+              :ptz-busy="ptzBusy"
+              :source-mode="sourceMode"
+              :source-status="sourceMode === 'camera' ? camera?.status : localPlayback?.status"
+              @toggle-recording="toggleRecording"
+              @refresh-ptz="refreshPtz()"
+            >
+              <MonitoringSettingsActions
+                :loaded="!!savedSettings" :dirty="recordingDirty" :saving="savingSettings" :valid="recordingValid"
+                @save="saveSettings('recording')" @reset="resetSettings('recording')" @defaults="restoreDefaultSettings('recording')"
+              />
+            </RecordingControls>
+          </el-tab-pane>
+          <el-tab-pane name="manual" lazy>
+            <template #label><span class="monitoring-tab-label"><Crosshair :size="15" />手动镜头</span></template>
+            <ManualCameraControls
+              :camera-source="sourceMode === 'camera'"
+              :source-running="camera?.status === 'running'"
+              :preview-available="Boolean(frameImage || monitorSrc)"
+              :optical-owned="opticalOwned"
+              :ptz="ptz"
+              :status="recordingStatus"
+              :focus-status="focusStatus"
+              :busy="ptzBusy"
+              @ptz="sendPtz"
+              @zoom="manualZoom"
+              @refresh="refreshPtz()"
+              @pick-focus="focusPicking = true"
+              @stop-focus="stopFocus"
+              @focus-region="focusRegion"
+              @show-recording="monitorTab = 'recording'"
+            />
+          </el-tab-pane>
+          <el-tab-pane name="recognition" lazy>
+            <template #label><span class="monitoring-tab-label"><ScanLine :size="15" />识别与筛选</span></template>
+            <RecognitionControls v-model="settings" :loaded="!!savedSettings" :saving="savingSettings" :processing-summary="liveFrame?.processing_summary">
+              <MonitoringSettingsActions
+                :loaded="!!savedSettings" :dirty="recognitionDirty" :saving="savingSettings" :valid="recognitionValid"
+                @save="saveSettings('recognition')" @reset="resetSettings('recognition')" @defaults="restoreDefaultSettings('recognition')"
+              />
+            </RecognitionControls>
+          </el-tab-pane>
+        </el-tabs>
+      </aside>
     </section>
 
     <section class="lower-grid monitoring-results-grid">

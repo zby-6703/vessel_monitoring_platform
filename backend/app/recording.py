@@ -191,7 +191,11 @@ class RecordingManager(OpticalCycleMixin):
             settings = value if isinstance(value, RecordingSettings) else RecordingSettings.model_validate({**self.settings.model_dump(), **value})
             if settings.enabled and not shutil.which("ffmpeg"):
                 raise ValueError("启用录制需要服务端安装 ffmpeg（含 libx264 编码器）")
-            if settings.enabled and settings.recording_mode == "optical_cycle" and self.zoom_controller is not None:
+            optics_changed = any(getattr(settings, field) != getattr(self.settings, field) for field in (
+                "enabled", "recording_mode", "auto_horizontal_follow", "adaptive_zoom_enabled",
+                "zoom_factor", "max_optical_zoom",
+            ))
+            if optics_changed and settings.enabled and settings.recording_mode == "optical_cycle" and self.zoom_controller is not None:
                 self._validate_zoom_policy(settings)
             _atomic_json(self.settings_path, settings.model_dump())
             if not settings.enabled:

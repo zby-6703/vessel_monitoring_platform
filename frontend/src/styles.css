@@ -417,7 +417,20 @@ img { display: block; max-width: 100%; }
 .focus-click-hint { position: absolute; z-index: 5; bottom: 60px; left: 12px; padding: 5px 8px; color: #f5d8ad; background: rgb(20 17 11 / 80%); font-size: 10px; pointer-events: none; }
 .recording-live-indicator { margin-left: 4px; color: #ff8e80; font-size: 10px; }
 .monitor-caption { flex: 1; padding-left: 5px; color: var(--text-secondary); font-size: 10px; }
-.recording-controls .panel-header h2 { display: flex; align-items: center; gap: 7px; }
+.monitoring-controls { min-width: 0; }
+.monitoring-tabs > .el-tabs__header { margin: 0; }
+.monitoring-tabs > .el-tabs__header .el-tabs__item { padding-inline: 6px; height: 48px; font-size: 12px; }
+.monitoring-tab-label { display: inline-flex; align-items: center; gap: 6px; }
+.control-heading { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.realtime-recognition { padding: 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 6px; }
+.recognition-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; }
+.manual-control-header, .manual-control-lock { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.manual-control-header .control-heading { margin-bottom: 0; }
+.manual-control-lock { margin: 12px 0; padding: 8px 10px; background: rgb(33 168 181 / 7%); border: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
+.manual-control-group { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.manual-control-group h4 { margin: 0; font-size: 12px; font-weight: 600; }
+.manual-control-group .setting-hint { margin-bottom: 4px; }
+.manual-control-group .el-button { font-size: 11px; }
 .recording-state { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
 .recording-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
 .recording-state.armed { color: var(--success); }

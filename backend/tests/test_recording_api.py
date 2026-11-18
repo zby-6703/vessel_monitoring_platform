@@ -85,6 +85,23 @@ def test_default_settings_endpoint_is_a_read_only_preview(recording_client):
     assert reset.status_code == 200 and reset.json() == response.json()
 
 
+def test_recognition_patch_does_not_require_a_camera_capability_check(recording_client):
+    client, manager = recording_client
+    assert client.put("/api/recording/settings", json={"enabled": True, "auto_horizontal_follow": True}).status_code == 200
+
+    class UnavailableLens:
+        def validate_horizontal_follow(self):
+            raise ValueError("设备暂不可用")
+
+    manager.set_zoom_controller(UnavailableLens())
+    saved = client.put("/api/recording/settings", json={"enable_ship_name": False})
+    assert saved.status_code == 200
+    assert saved.json()["enabled"] and saved.json()["auto_horizontal_follow"]
+    assert saved.json()["enable_ship_name"] is False
+    # Changing the optical policy still checks the device.
+    assert client.put("/api/recording/settings", json={"max_optical_zoom": 6}).status_code == 422
+
+
 def test_bad_deployment_defaults_return_error_without_changing_saved_settings(recording_client):
     client, manager = recording_client
     manager.site_profile_path = manager.root / "missing-defaults.json"

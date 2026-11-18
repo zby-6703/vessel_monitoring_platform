@@ -16,6 +16,7 @@ class OpticalPatrolMixin:
         self._patrol_follow_started = False
         self._patrol_overview_since = None
         self._patrol_candidate = None
+        self._patrol_last_detail_match = None
         self._patrol_entry_hits = 0
         self._patrol_entry_last = None
 
@@ -84,16 +85,19 @@ class OpticalPatrolMixin:
         zoom = float(self.current_zoom_factor or 1.)
         previous = self.locked_target["box"]
         pending = self._patrol_candidate
+        if pending and pending["generation"] != self._cycle_generation:
+            pending = None
+        last_match = self._patrol_last_detail_match
+        recent_view = (last_match is not None and last_match[0] == self._cycle_generation
+                       and 0 < timestamp - last_match[1] <= self.target_selector.MAX_OBSERVATION_GAP)
         for candidate in self.adaptive_selection["targets"]:
-            if not self._consistent_locked_target(candidate):
+            if not self._consistent_locked_target(candidate, check_appearance=False):
                 continue
             ratio = candidate["height_ratio"] / max(.001, self._initial_target_height)
             if not .6 <= ratio <= 1.8:
                 continue
             track = self.target_selector.tracks[candidate["target_id"]]
             similarity = self.target_selector.appearance_similarity(self._locked_appearance, track.appearance)
-            if similarity is not None and similarity < .65:
-                continue
             box = self._source_target_box(track.vessel, image.shape[1], image.shape[0])
             if not box:
                 continue
@@ -101,19 +105,33 @@ class OpticalPatrolMixin:
             entering = box[0] <= .05 if self._patrol_direction > 0 else box[2] >= .95
             old_overlap = max(0., min(previous[2], candidate["box"][2]) - max(previous[0], candidate["box"][0]))
             continuing = pending and pending["target_id"] == candidate["target_id"]
+            same_track = (candidate["ship_id"] == self.locked_target.get("ship_id")
+                          and track.vessel.get("tracked") is not False)
+            adjacent = (zoom > 1 and same_track and recent_view
+                        and candidate["target_id"] == self.locked_target["target_id"]
+                        and self._geometric_reacquisition(candidate, check_appearance=False))
+            # A cropped bow and the overview hull can have very different colors.
+            # Admit a weak color match only with a tracked entry or same-view continuity.
+            if (similarity is not None and similarity < .65
+                    and not (zoom > 1 and same_track and (entering or continuing or adjacent))):
+                continue
             if zoom > 1:
                 forward = ((candidate["box"][0] + candidate["box"][2] - previous[0] - previous[2]) * self._patrol_direction >= -.04)
-                plausible = forward and (known or entering or continuing)
+                plausible = adjacent or (forward and (known or entering or continuing))
             else:
                 plausible = known or old_overlap > 0
             if plausible:
-                matches.append(candidate)
+                matches.append((candidate, adjacent))
         if len(matches) != 1:
             self._patrol_candidate = None
             return None
-        candidate = matches[0]
+        candidate, adjacent = matches[0]
+        if adjacent:
+            self._patrol_candidate = None
+            self._association_uncertain = False
+            return candidate
         if not pending or pending["target_id"] != candidate["target_id"] or timestamp - pending["last"] > 2.5:
-            pending = {"target_id": candidate["target_id"], "hits": 0, "since": timestamp}
+            pending = {"target_id": candidate["target_id"], "hits": 0, "since": timestamp, "generation": self._cycle_generation}
         pending.update(hits=pending["hits"] + 1, last=timestamp)
         self._patrol_candidate = pending
         if pending["hits"] >= 3 and timestamp - pending["since"] >= .3:
@@ -152,10 +170,11 @@ class OpticalPatrolMixin:
             self._empty_hits = 0
             self._zoomed_ship_seen = True
             if self.phase == "zoomed":
+                self._patrol_last_detail_match = (self._cycle_generation, timestamp)
                 self.catalog[self.active["id"]]["target_reacquired"] = True
                 if self._zoom_hold_since is None:
                     self._zoom_hold_since = timestamp
-                self._maybe_follow_horizontal(vessel, image, timestamp, policy)
+                self._maybe_follow_horizontal(vessel, image, timestamp, policy, observation_context=observation_context)
                 return
 
             # At 1x + restored original pan, use only the overview plane.

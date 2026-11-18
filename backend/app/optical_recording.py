@@ -563,7 +563,7 @@ class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
             if isinstance(track_id, int) and track_id not in item["track_ids"]:
                 item["track_ids"].append(track_id)
 
-    def _consistent_locked_target(self, target, *, allow_ambiguous=False):
+    def _consistent_locked_target(self, target, *, allow_ambiguous=False, check_appearance=True):
         if not self.locked_target or target.get("identity_ambiguous") and not allow_ambiguous:
             return False
         previous, current = self.locked_target["box"], target["box"]
@@ -572,17 +572,19 @@ class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
             return False
         if target["height_ratio"] < self._initial_target_height * .4:
             return False
+        if not check_appearance:
+            return True
         appearance = self.target_selector.tracks[target["target_id"]].appearance
         similarity = self.target_selector.appearance_similarity(self._locked_appearance, appearance)
         return similarity is None or similarity >= .3
 
-    def _geometric_reacquisition(self, target, *, allow_ambiguous=False):
+    def _geometric_reacquisition(self, target, *, allow_ambiguous=False, check_appearance=True):
         """Compare visible hulls in the SAME reference plane, including cropping.
 
         Grey/IR hulls have no useful hue histogram. A new tracker ID can still
         be confirmed by unique, repeated geometry, never by the ID alone.
         """
-        if not self._consistent_locked_target(target, allow_ambiguous=allow_ambiguous):
+        if not self._consistent_locked_target(target, allow_ambiguous=allow_ambiguous, check_appearance=check_appearance):
             return False
         zoom = float(self.current_zoom_factor or 1.)
         low, high = .5 - .5 / zoom, .5 + .5 / zoom

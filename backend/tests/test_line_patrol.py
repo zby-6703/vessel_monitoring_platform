@@ -302,6 +302,39 @@ def test_configurable_detail_lines_use_enlarged_x_coordinates(cycle_factory, rev
     assert h.controller.pan_calls and (h.controller.pan_calls[0] < 0) == reverse
 
 
+@pytest.mark.parametrize("detail_ship_id", [1, 99])
+def test_right_line_follows_the_confirmed_track_when_zoom_changes_hull_colors(cycle_factory, monkeypatch, detail_ship_id):
+    h = patrol(cycle_factory, detail_line_left=.25, detail_line_right=.75)
+    h.warm()
+
+    def hull_appearance(*_):
+        return (1., 0.) if h.manager.current_zoom_factor == 1 else (.1, .9949874)
+
+    monkeypatch.setattr(h.manager.target_selector, "appearance_for", hull_appearance)
+    h.feed([boat(-.25, reverse=True)])
+    cross_entry(h, reverse=True)
+    for x in (.32, .33, .34, .35, .37, .39, .41):
+        h.feed([boat(x, reverse=True, ship_id=detail_ship_id)], advance=.5)
+    h.drain_control()
+    assert not h.controller.pan_calls
+    assert h.manager._zoomed_ship_seen == (detail_ship_id == 1)
+
+    context = {**h.manager.zoom_observation_context(), "source_timestamp": h.timestamp, "source_frame_index": 420}
+    h.feed([boat(.418, reverse=True, ship_id=detail_ship_id)], context=context, advance=.15)
+    h.drain_control()
+    if detail_ship_id != 1:
+        assert not h.controller.pan_calls
+        return
+
+    assert h.controller.pan_calls == [-.3]
+    item = h.manager.catalog[h.manager.active["id"]]
+    trigger = next(event for event in item["patrol_events"] if event["event"] == "follow_triggered")
+    assert trigger["tail"] == pytest.approx(.746)
+    assert trigger["detail_line"] == .75
+    assert trigger["observation_frame_index"] == item["pan_events"][0]["observation_frame_index"] == 420
+    assert trigger["observation_delay_seconds"] == pytest.approx(.15)
+
+
 def test_two_overlapping_arrivals_cannot_claim_the_locked_ship(cycle_factory):
     h = patrol(cycle_factory)
     h.warm(); h.feed([boat(-.25)]); cross_entry(h)

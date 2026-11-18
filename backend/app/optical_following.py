@@ -85,7 +85,7 @@ class OpticalFollowingMixin:
                 plan.update(zoom_factor=zoom, selection_reason="horizontal_view_limited")
         return plan
 
-    def _maybe_follow_horizontal(self, vessel, image, timestamp, policy, *, planned_zoom=None):
+    def _maybe_follow_horizontal(self, vessel, image, timestamp, policy, *, planned_zoom=None, observation_context=None):
         if (not policy.auto_horizontal_follow or self._pan_limited or self._pan_steps >= policy.pan_max_steps or detail_focus.busy()
                 or self._control_future is not None or self._cycle_halt or self._identity_fallback_active or self._zoom_fallback_active):
             return False
@@ -103,6 +103,7 @@ class OpticalFollowingMixin:
         center = (box[0] + box[2]) / 2
         dead_zone = min(policy.pan_dead_zone, .3 / planned_zoom) if planned_zoom and planned_zoom > 1 else policy.pan_dead_zone
         self._pan_bow_progress = None
+        trigger = {}
         if policy.line_patrol_enabled:
             if not self._patrol_direction:
                 return False
@@ -115,9 +116,12 @@ class OpticalFollowingMixin:
             # open water while the same vessel catches up with the new angle.
             self._pan_bow_progress = box[2] if self._patrol_direction > 0 else 1 - box[0]
             step = self._patrol_direction * policy.pan_step_limit
+            context = observation_context or {}
+            observed_at = context.get("source_timestamp", timestamp)
+            trigger = {"tail": tail, "detail_line": boundary, "observation_frame_index": context.get("source_frame_index"),
+                       "observation_source_seconds": observed_at, "observation_delay_seconds": max(0., timestamp - observed_at)}
             if not self._patrol_follow_started and self.active:
-                self._patrol_event("follow_triggered", timestamp, tail=tail, detail_line=boundary,
-                                   requested_fov_x=step)
+                self._patrol_event("follow_triggered", timestamp, requested_fov_x=step, **trigger)
             self._patrol_follow_started = True
         else:
             if abs(center - .5) <= dead_zone:
@@ -140,7 +144,7 @@ class OpticalFollowingMixin:
                                               zoom_factor=self._control_target)
         self._control_future = future
         session_id = self.session_id
-        future.add_done_callback(lambda completed: self._pan_completed(completed, session_id))
+        future.add_done_callback(lambda completed: self._pan_completed(completed, session_id, trigger))
         return True
 
     def _fail_horizontal_follow(self, error=None):
@@ -163,7 +167,7 @@ class OpticalFollowingMixin:
         self._cycle_exit_reason = "pan_failed"
         self._command_zoom(1., "zooming_out")
 
-    def _pan_completed(self, future, session_id):
+    def _pan_completed(self, future, session_id, trigger):
         with self.lock:
             if future is not self._control_future or session_id != self.session_id:
                 return
@@ -193,7 +197,7 @@ class OpticalFollowingMixin:
                     "fov_x": step, "pan_offset": self._pan_offset, "settled": True,
                     "step_number": self._pan_steps if step else None,
                     "step_limit_reached": self._pan_steps >= policy.pan_max_steps,
-                    "limited": self._pan_limited, "before": result.get("before"), "after": result.get("after")})
+                    "limited": self._pan_limited, "before": result.get("before"), "after": result.get("after"), **trigger})
             if self._cycle_halt:
                 self._command_zoom(1., "zooming_out")
                 return

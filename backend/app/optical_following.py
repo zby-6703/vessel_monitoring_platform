@@ -13,6 +13,8 @@ class OpticalFollowingMixin:
         self._pan_displaced = False
         self._follow_owned = False
         self._pan_limited = False
+        self._pan_steps = 0
+        self._pan_bow_progress = None
         self._last_pan_adjust = None
         self._prezoom_alignments = 0
         self._body_since = None
@@ -84,7 +86,7 @@ class OpticalFollowingMixin:
         return plan
 
     def _maybe_follow_horizontal(self, vessel, image, timestamp, policy, *, planned_zoom=None):
-        if (not policy.auto_horizontal_follow or self._pan_limited or detail_focus.busy()
+        if (not policy.auto_horizontal_follow or self._pan_limited or self._pan_steps >= policy.pan_max_steps or detail_focus.busy()
                 or self._control_future is not None or self._cycle_halt or self._identity_fallback_active or self._zoom_fallback_active):
             return False
         if policy.line_patrol_enabled and (self.phase != "zoomed" or float(self.current_zoom_factor or 1.) <= 1):
@@ -100,6 +102,7 @@ class OpticalFollowingMixin:
             return False
         center = (box[0] + box[2]) / 2
         dead_zone = min(policy.pan_dead_zone, .3 / planned_zoom) if planned_zoom and planned_zoom > 1 else policy.pan_dead_zone
+        self._pan_bow_progress = None
         if policy.line_patrol_enabled:
             if not self._patrol_direction:
                 return False
@@ -108,15 +111,10 @@ class OpticalFollowingMixin:
             distance = (tail - boundary) * self._patrol_direction
             if distance < -1e-6:
                 return False
-            # The line is a trigger, not a centring target. Move by the
-            # configured step so the next settled view has room for the stern
-            # to travel during motor feedback and the next inference.
-            room = tail if self._patrol_direction > 0 else 1 - tail
-            # Near an unusually early line, keep the stern inside the frame.
-            magnitude = min(policy.pan_step_limit, room)
-            if magnitude <= 0:
-                return False
-            step = self._patrol_direction * magnitude
+            # Jump ahead along the route. An enlarged view may initially show
+            # open water while the same vessel catches up with the new angle.
+            self._pan_bow_progress = box[2] if self._patrol_direction > 0 else 1 - box[0]
+            step = self._patrol_direction * policy.pan_step_limit
             if not self._patrol_follow_started and self.active:
                 self._patrol_event("follow_triggered", timestamp, tail=tail, detail_line=boundary,
                                    requested_fov_x=step)
@@ -124,7 +122,9 @@ class OpticalFollowingMixin:
         else:
             if abs(center - .5) <= dead_zone:
                 return False
-            step = max(-policy.pan_step_limit, min(policy.pan_step_limit, 2 * (center - .5)))
+            # Panorama alignment remains a small nudge before magnification.
+            step_limit = min(policy.pan_step_limit, .3) if prealign else policy.pan_step_limit
+            step = max(-step_limit, min(step_limit, 2 * (center - .5)))
         self._last_pan_adjust = timestamp
         if prealign:
             self._prezoom_alignments += 1
@@ -155,7 +155,7 @@ class OpticalFollowingMixin:
                 self.catalog[self.active["id"]].setdefault("pan_errors", []).append({
                     "source_seconds": self.last_timestamp, "kind": type(error).__name__, "error": detail})
         if isinstance(error, (httpx.TransportError, OSError)) and not self._cycle_halt:
-            # RelativeMove is not idempotent: never repeat an uncertain pan.
+            # Never repeat an uncertain pan.
             # Recover with absolute panorama + original pan position instead.
             self._schedule_zoom_recovery(self._control_target)
             return
@@ -172,21 +172,27 @@ class OpticalFollowingMixin:
             try:
                 result = future.result()
                 step = float(result["fov_x"])
-                if result.get("settled") is not True or not math.isfinite(step) or abs(step) > .6:
+                if result.get("settled") is not True or not math.isfinite(step) or abs(step) > 2.:
                     raise ValueError("水平移动未确认")
             except Exception as exc:
                 self._fail_horizontal_follow(exc)
                 return
             self._pan_offset += step / (2 * factor)
             self._pan_limited = bool(result.get("limited"))
+            if step:
+                self._pan_steps += 1
+            policy = self._cycle_policy or self.settings
             if self.active:
                 item = self.catalog[self.active["id"]]
+                item["horizontal_steps"] = self._pan_steps
                 if self._pan_limited:
                     item.update(horizontal_limit_reached=True, pan_limit_zoom_factor=factor)
                 item.setdefault("pan_events", []).append({
                     "source_seconds": self.last_timestamp, "requested_source_seconds": self._last_pan_adjust,
                     "zoom_factor": factor,
                     "fov_x": step, "pan_offset": self._pan_offset, "settled": True,
+                    "step_number": self._pan_steps if step else None,
+                    "step_limit_reached": self._pan_steps >= policy.pan_max_steps,
                     "limited": self._pan_limited, "before": result.get("before"), "after": result.get("after")})
             if self._cycle_halt:
                 self._command_zoom(1., "zooming_out")
@@ -195,7 +201,8 @@ class OpticalFollowingMixin:
             self._empty_hits = 0
             self._body_since = self._body_last_seen = None
             self._body_hits = 0
-            self._phase(self._pan_resume_phase, reset_acquisition=False)
+            jumped_ahead = self._pan_bow_progress is not None and abs(step) / 2 >= self._pan_bow_progress
+            self._phase(self._pan_resume_phase, reset_acquisition=jumped_ahead)
 
     def _hold_zoom(self, timestamp, policy):
         return self.phase == "zoomed" and (self._zoom_hold_since is None

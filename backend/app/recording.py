@@ -519,7 +519,8 @@ class RecordingManager(OpticalCycleMixin):
                     "phase": self.phase, "current_zoom_factor": self.current_zoom_factor, "target_zoom_factor": self._active_zoom_factor if self.active else self.settings.zoom_factor,
                     "manual_zoom_active": self._manual_zoom_active,
                     "horizontal_follow": {"enabled": self.settings.auto_horizontal_follow, "moving": self.phase == "panning",
-                        "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced},
+                        "offset": self._pan_offset, "limited": self._pan_limited, "return_pending": self._pan_displaced,
+                        "steps": self._pan_steps, "max_steps": (self._cycle_policy or self.settings).pan_max_steps},
                     "detail_capture_priority": (self._cycle_policy or self.settings).detail_capture_priority,
                     "line_patrol": self._patrol_status(),
                     "zoom_locked_until_departure": bool(((self._cycle_policy or self.settings).detail_capture_priority

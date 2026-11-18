@@ -119,9 +119,17 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <div class="recognition-toggle"><strong>自动左右跟随船舶</strong><el-switch :model-value="modelValue.auto_horizontal_follow" :disabled="!loaded || saving" aria-label="自动左右跟随船舶" @update:model-value="set('auto_horizontal_follow', Boolean($event))" /></div>
           <p class="setting-hint">锁定同一艘船，仅做水平跟随，不主动调整上下取景；缩回原倍率时恢复原水平机位。分界线模式由放大画面中的船尾触线触发旋转。</p>
           <p v-if="modelValue.auto_horizontal_follow && ptz && !ptz.horizontal_follow_supported" class="recording-error">尚未确认设备支持 FOV 水平跟随与绝对位置反馈，请重新检查镜头能力。</p>
+          <template v-if="modelValue.auto_horizontal_follow">
+            <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
+              <el-form-item label="单步旋转 (当前画面宽度 %)"><el-input-number :model-value="modelValue.pan_step_limit * 50" :min="2.5" :max="100" :step="2.5" :precision="1" controls-position="right" @update:model-value="set('pan_step_limit', Number($event) / 50)" /></el-form-item>
+              <el-form-item label="每艘船最多旋转步数"><el-input-number :model-value="modelValue.pan_max_steps" :min="1" :max="20" :precision="0" controls-position="right" @update:model-value="set('pan_max_steps', Number($event))" /></el-form-item>
+            </el-form>
+            <p class="setting-hint">同一艘船的多轮放大共用步数。左右行程剩余不足或镜头尚未测得视野与位置的换算时，单步可能缩短。</p>
+            <p v-if="status?.active_id && status.horizontal_follow?.max_steps" class="setting-hint" role="status">已旋转 {{ status.horizontal_follow.steps }} / {{ status.horizontal_follow.max_steps }} 步</p>
+          </template>
           <div class="recognition-toggle"><strong>分界线触发 · 同船多轮放大</strong><el-switch :model-value="modelValue.line_patrol_enabled" :disabled="!loaded || saving" aria-label="分界线触发多轮放大" @update:model-value="set('line_patrol_enabled', Boolean($event))" /></div>
           <template v-if="modelValue.line_patrol_enabled">
-            <p class="setting-hint">船头越过原倍率入口线后放大。船尾越过放大画面的第一条线后开始跟随，达到旋转上限后保持倍率至船尾离场。缩回后，根据船尾是否越过原倍率出口线决定是否继续放大。</p>
+            <p class="setting-hint">船头越过原倍率入口线后放大。船尾越过放大画面的第一条线后触发旋转，达到步数或旋转范围上限后，保持当前角度录像至船尾离场。缩回后，根据船尾是否越过原倍率出口线决定是否继续放大。</p>
             <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
               <el-form-item label="原倍率左分界线 (画面 x %)"><el-input-number :model-value="Number((modelValue.overview_line_left * 100).toFixed(2))" :min="1" :max="99" :step="1" :precision="2" controls-position="right" @update:model-value="set('overview_line_left', Number($event) / 100)" /></el-form-item>
               <el-form-item label="原倍率右分界线 (画面 x %)"><el-input-number :model-value="Number((modelValue.overview_line_right * 100).toFixed(2))" :min="1" :max="99" :step="1" :precision="2" controls-position="right" @update:model-value="set('overview_line_right', Number($event) / 100)" /></el-form-item>
@@ -136,7 +144,7 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <template v-if="!modelValue.line_patrol_enabled">
           <div class="recognition-toggle"><strong>细节采集优先：放大后跟随至离场</strong><el-switch :model-value="modelValue.detail_capture_priority" :disabled="!loaded || saving" aria-label="细节采集优先" @update:model-value="set('detail_capture_priority', Boolean($event))" /></div>
           <p class="setting-hint">开启后先等待合适位置光学放大，再水平跟船；必要时在放大前做一次水平对准。本轮保持已选光学倍率，达到水平范围后停转并保持放大，目标离开画面并确认离场后才回到 1× 和原水平机位。适合采集船名、吃水刻度视频；停止、故障和最长录制保护仍生效。关闭后恢复录制中的自适应变倍。切换模式会结束当前轮并重新初始化。</p>
-          <p v-if="status?.zoom_locked_until_departure" class="setting-hint" role="status">{{ status?.horizontal_follow?.limited ? '已达到水平范围，停转并保持放大录像，等待船尾离场。' : '已锁定本轮光学倍率，正在水平跟随采集细节。' }}</p>
+          <p v-if="status?.zoom_locked_until_departure" class="setting-hint" role="status">{{ status.horizontal_follow?.limited ? '已达到水平范围，保持当前角度录像，等待船尾离场。' : status.horizontal_follow?.max_steps && status.horizontal_follow.steps === status.horizontal_follow.max_steps ? '已达到旋转步数上限，保持当前角度录像，等待船尾离场。' : '已锁定本轮光学倍率，正在水平跟随采集细节。' }}</p>
           <p v-else-if="status?.horizontal_follow?.limited" class="setting-hint">已达到水平跟随范围，本轮继续录像并等待目标离场。</p>
           <div class="recognition-toggle"><strong>等待船舶主体入画后放大</strong><el-switch :model-value="modelValue.wait_full_body" :disabled="!loaded || saving" aria-label="等待船舶主体入画后放大" @update:model-value="set('wait_full_body', Boolean($event))" /></div>
           <p class="setting-hint">先以 1× 录制，主体入画经两次观测短暂确认即可放大；等待 {{ modelValue.body_entry_max_wait_seconds }} 秒后，已有较大船体进入时可先尝试不超过 2×，无需一直等待完整船尾。船头刚入画、船体两端均被截断或没有合适档位时继续全景录像。放大后至少观察 {{ modelValue.zoom_min_hold_seconds }} 秒，连续 {{ modelValue.departure_confirm_seconds }} 秒且至少 {{ modelValue.departure_min_observations }} 次新观测未见目标后才确认离场；目标关联不明最多等待 {{ modelValue.target_acquire_timeout_seconds }} 秒。</p>
@@ -149,7 +157,6 @@ const targetLabel = (target: AdaptiveTarget) => `目标 ${target.target_id}${tar
           <el-collapse class="recording-advanced"><el-collapse-item name="horizontal-policy" title="左右跟随与入画参数">
             <el-form label-position="top" class="recording-settings-grid" :disabled="!loaded || saving">
               <el-form-item v-if="!modelValue.line_patrol_enabled" label="中心不动作区 (左右各 %)"><el-input-number :model-value="modelValue.pan_dead_zone * 100" :min="5" :max="35" controls-position="right" @update:model-value="set('pan_dead_zone', Number($event) / 100)" /></el-form-item>
-              <el-form-item label="每次最多水平修正 (画面宽 %)"><el-input-number :model-value="modelValue.pan_step_limit * 50" :min="2.5" :max="30" :step="2.5" controls-position="right" @update:model-value="set('pan_step_limit', Number($event) / 50)" /></el-form-item>
               <el-form-item label="水平动作间隔 (秒)"><el-input-number :model-value="modelValue.pan_cooldown_seconds" :min=".5" :max="15" :step=".5" controls-position="right" @update:model-value="set('pan_cooldown_seconds', Number($event))" /></el-form-item>
               <el-form-item v-if="!modelValue.line_patrol_enabled" label="最大偏离原位 (云台全行程 %)"><el-input-number :model-value="modelValue.pan_max_travel_ratio * 100" :min="1" :max="40" controls-position="right" @update:model-value="set('pan_max_travel_ratio', Number($event) / 100)" /></el-form-item>
               <el-form-item v-if="!modelValue.line_patrol_enabled" label="船体入画边缘余量 (%)"><el-input-number :model-value="modelValue.body_entry_margin * 100" :min="1" :max="20" controls-position="right" @update:model-value="set('body_entry_margin', Number($event) / 100)" /></el-form-item>

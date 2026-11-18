@@ -14,7 +14,7 @@ from app.live_capture import OnvifControl
 def device(tmp_path, monkeypatch):
     settings = replace(Settings(), camera_onvif_ptz_url="http://camera/ptz", camera_onvif_source_token="sensor",
         camera_onvif_ptz_configuration_token="config", camera_onvif_zoom_timeout=2,
-        camera_onvif_zoom_calibration='{"1": 0.1, "3": 0.3}')
+        camera_onvif_zoom_calibration='{"1": 0.1, "3": 0.3, "4": 0.4}')
     monkeypatch.setattr(horizontal_follow, "get_effective_settings", lambda: settings)
     monkeypatch.setattr(horizontal_follow, "PLATFORM_ROOT", tmp_path)
     control = OnvifControl()
@@ -77,6 +77,48 @@ def test_pending_origin_is_recovered_after_a_process_restart(device):
     assert state["x"] == pytest.approx(original)
     assert other._follow_origin["displaced"] is False
     assert sum(action == "AbsoluteMove" for action, _ in calls) == 1
+
+
+@pytest.mark.parametrize("step", [-1.6, 1.6, 2.])
+def test_calibrated_large_step_uses_one_absolute_move_at_current_zoom_and_tilt(device, step):
+    control, state, calls, _, _ = device
+    state["zoom"] = .4
+    control.begin_horizontal_follow()
+    control._follow_origin["gain_at_one_x"] = .24
+
+    result = control.follow_horizontal(step, max_travel_ratio=.15, zoom_factor=4)
+
+    assert result["settled"] and result["fov_x"] == step and not result["limited"]
+    assert [action for action, _ in calls] == ["AbsoluteMove", "Stop"]
+    assert float(calls[0][1]["x"]) == pytest.approx(.2 + step * .24 / 4)
+    assert float(calls[0][1]["y"]) == -.15
+    assert control._follow_origin["gain_at_one_x"] == .24
+
+
+def test_large_step_is_shortened_at_the_mechanical_limit(device):
+    control, state, calls, _, _ = device
+    state.update(x=.92, zoom=.4)
+    control.begin_horizontal_follow()
+    control._follow_origin["gain_at_one_x"] = .24
+
+    result = control.follow_horizontal(1.6, max_travel_ratio=.15, zoom_factor=4)
+
+    assert result["settled"] and result["limited"] and 1 < result["fov_x"] < 1.6
+    assert [action for action, _ in calls] == ["AbsoluteMove", "Stop"]
+    assert .92 < state["x"] < 1.
+
+
+def test_uncalibrated_large_step_learns_from_one_short_move(device):
+    control, state, calls, _, _ = device
+    state["zoom"] = .4
+    control.begin_horizontal_follow()
+
+    first = control.follow_horizontal(1.6, max_travel_ratio=.4, zoom_factor=4)
+    second = control.follow_horizontal(1.6, max_travel_ratio=.4, zoom_factor=4)
+
+    assert first["fov_x"] == .6 and not first["limited"]
+    assert second["fov_x"] == 1.6 and not second["limited"]
+    assert [action for action, _ in calls] == ["RelativeMove", "Stop", "AbsoluteMove", "Stop"]
 
 
 def test_travel_limit_stops_further_panning_but_allows_home_return(device):
@@ -150,7 +192,7 @@ def test_uncertain_move_still_stops_and_restores_the_original_position(device):
     assert state["x"] == .2
 
 
-@pytest.mark.parametrize("step", [float("nan"), float("inf"), 0, .7, -.7])
+@pytest.mark.parametrize("step", [float("nan"), float("inf"), 0, 2.01, -2.01])
 def test_invalid_follow_step_never_moves_the_camera(device, step):
     control, _, calls, _, _ = device
     with pytest.raises(ValueError): control.follow_horizontal(step, max_travel_ratio=.15, zoom_factor=1)

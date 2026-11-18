@@ -32,6 +32,7 @@ class OpticalPatrolMixin:
         elif self.phase in {"zoomed", "panning", "zooming_in"}:
             stage = ("waiting_detail_entry" if not self._zoomed_ship_seen else
                      "detail_limit" if self._pan_limited else
+                     "detail_step_limit" if self._pan_steps >= policy.pan_max_steps else
                      "detail_follow" if self._patrol_follow_started else "waiting_detail_stern")
         elif not self._patrol_direction:
             stage = "waiting_direction"

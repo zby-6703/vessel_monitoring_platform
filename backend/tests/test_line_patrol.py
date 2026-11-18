@@ -16,6 +16,7 @@ def boat(x, width=.5, *, reverse=False, ship_id=1):
 
 
 def patrol(factory, **overrides):
+    overrides.setdefault("pan_step_limit", .3)
     return factory(line_patrol_enabled=True, auto_horizontal_follow=True,
                    zoom_view_limits_enabled=False, **overrides)
 
@@ -74,6 +75,73 @@ def test_detail_waits_for_stern_line_then_pans_only_in_travel_direction(cycle_fa
     trigger = next(event for event in events if event["event"] == "follow_triggered")
     assert trigger["detail_line"] == pytest.approx(2 / 3 if reverse else 1 / 3)
     assert (trigger["tail"] <= trigger["detail_line"]) if reverse else (trigger["tail"] >= trigger["detail_line"])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_large_follow_steps_stop_after_two_and_keep_recording(cycle_factory, reverse):
+    h = patrol(cycle_factory, pan_step_limit=1.6, pan_max_steps=2)
+    h.warm()
+    h.feed([boat(-.25, reverse=reverse)])
+    rid = h.manager.active["id"]
+    cross_entry(h, reverse=reverse)
+    acquire(h, .38, reverse=reverse)
+    for x in (.42, .445, .49, .54, .59, .64, .69, .715, .76, .81, .86, .91, .96, .99):
+        h.feed([boat(x, reverse=reverse)], advance=.5)
+        h.phase("zoomed")
+
+    sign = -1 if reverse else 1
+    assert h.controller.pan_calls == [sign * 1.6, sign * 1.6]
+    status = h.manager.status()
+    assert status["horizontal_follow"]["steps"] == status["horizontal_follow"]["max_steps"] == 2
+    assert status["line_patrol"]["stage"] == "detail_step_limit"
+    assert status["active_id"] == rid and h.controller.calls == [1, 3]
+    events = h.manager.catalog[rid]["pan_events"]
+    assert [event["step_number"] for event in events] == [1, 2]
+    assert [event["step_limit_reached"] for event in events] == [False, True]
+
+
+def test_large_pan_waits_for_the_same_hull_to_enter_its_new_view(cycle_factory):
+    h = patrol(cycle_factory, pan_step_limit=1.6, target_acquire_timeout_seconds=6)
+    h.warm()
+    h.feed([boat(.07, width=.2)])
+    h.feed([boat(.11, width=.2)])
+    cross_entry(h, x=.15, width=.2)
+    rid = h.manager.active["id"]
+    for x in (.24, .28, .32, .36, .40, .44, .45):
+        h.feed([boat(x, width=.12)], advance=.5)
+        h.phase("zoomed")
+
+    assert h.controller.pan_calls == [1.6]
+    assert h.manager.status()["line_patrol"]["stage"] == "waiting_detail_entry"
+    for _ in range(5):
+        h.feed([], advance=.5)
+    assert h.controller.calls == [1, 3]
+    for x in (.49, .51, .53, .55, .57, .59, .61):
+        h.feed([boat(x, width=.12)], advance=.2)
+    assert h.manager.status()["line_patrol"]["stage"] == "detail_follow"
+    assert h.manager.active["id"] == rid
+
+
+def test_follow_step_limit_is_shared_across_zoom_passes(cycle_factory):
+    h = patrol(cycle_factory, pan_step_limit=1.6, pan_max_steps=1)
+    h.warm()
+    h.feed([boat(-.25)])
+    rid = h.manager.active["id"]
+    cross_entry(h)
+    acquire(h, .38)
+    for x in (.42, .445, .50):
+        h.feed([boat(x)], advance=.5)
+        h.phase("zoomed")
+    h.depart()
+    h.phase("waiting_body")
+    acquire(h, .60)
+    h.phase("zoomed")
+    acquire(h, .62)
+
+    assert h.controller.calls == [1, 3, 1, 3]
+    assert h.controller.pan_calls == [1.6]
+    assert h.manager.status()["line_patrol"]["stage"] == "detail_step_limit"
+    assert h.manager.active["id"] == rid
 
 
 @pytest.mark.parametrize("reverse", [False, True])

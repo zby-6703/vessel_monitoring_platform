@@ -106,7 +106,7 @@ class HorizontalFollowMixin:
     def follow_horizontal(self, fov_x, *, max_travel_ratio, zoom_factor):
         if not math.isfinite(max_travel_ratio) or not 0 <= max_travel_ratio <= .4:
             raise ValueError("无效的水平跟随范围")
-        if not math.isfinite(fov_x) or abs(fov_x) > .6 or fov_x == 0:
+        if not math.isfinite(fov_x) or abs(fov_x) > 2. or fov_x == 0:
             raise ValueError("无效的水平跟随步长")
         with self.lock:
             settings = get_effective_settings()
@@ -142,12 +142,12 @@ class HorizontalFollowMixin:
             if (fov_x > 0 and (used >= travel or before["x"] >= native["x"]["max"] - tolerance * 4)
                     or fov_x < 0 and (-used >= travel or before["x"] <= native["x"]["min"] + tolerance * 4)):
                 return {"settled": True, "fov_x": 0., "limited": True, "before": before, "after": before}
-            fov_x = max(options["fov"]["x"]["min"], min(options["fov"]["x"]["max"], fov_x))
             remaining = (min(native["x"]["max"], origin["position"]["x"] + travel) - before["x"] if fov_x > 0
                          else before["x"] - max(native["x"]["min"], origin["position"]["x"] - travel))
             gain = origin.get("gain_at_one_x")
+            calibrated = isinstance(gain, (int, float)) and math.isfinite(gain) and gain > 0
             clamped = False
-            if isinstance(gain, (int, float)) and math.isfinite(gain) and gain > 0:
+            if calibrated:
                 safe_step = max(0., remaining) * zoom_factor / gain * .8
                 if safe_step < .03:
                     return {"settled": True, "fov_x": 0., "limited": True, "before": before, "after": before}
@@ -158,13 +158,28 @@ class HorizontalFollowMixin:
                 # Without an observed FOV/native relation, do not risk the
                 # first move wrapping a nearly exhausted native pan range.
                 return {"settled": True, "fov_x": 0., "limited": True, "before": before, "after": before}
+            else:
+                # Learn the FOV-to-native conversion with one conservative move.
+                fov_x = max(-.6, min(.6, fov_x))
+
             profile = f"<t:ProfileToken>{escape(settings.camera_onvif_profile_token)}</t:ProfileToken>"
+            fov = options["fov"]
+            target_x = None
+            if calibrated and not fov["x"]["min"] <= fov_x <= fov["x"]["max"]:
+                target_x = before["x"] + fov_x * gain / zoom_factor
+                action = "AbsoluteMove"
+                command = (f'<t:Position><tt:PanTilt x="{target_x:.12g}" y="{before["y"]:.12g}" '
+                           f'space={quoteattr(native["space"])}/></t:Position>')
+            else:
+                fov_x = max(fov["x"]["min"], min(fov["x"]["max"], fov_x))
+                action = "RelativeMove"
+                command = (f'<t:Translation><tt:PanTilt x="{fov_x:.8g}" y="0" '
+                           f'space={quoteattr(fov["space"])}/></t:Translation>')
             origin["displaced"] = True  # even a lost reply may have moved it
             self._save_follow_origin()
             deadline = time.monotonic() + settings.camera_onvif_zoom_timeout
             try:
-                self._request(settings, self.PTZ, "RelativeMove", profile +
-                    f'<t:Translation><tt:PanTilt x="{fov_x:.8g}" y="0" space={quoteattr(options["fov"]["space"])}/></t:Translation>')
+                self._request(settings, self.PTZ, action, profile + command)
                 while time.monotonic() < deadline:
                     if self._cancel_move.is_set():
                         raise RuntimeError("水平跟随已取消")
@@ -177,9 +192,10 @@ class HorizontalFollowMixin:
                             raise RuntimeError("云台反馈出现垂直位移，已停止跟随")
                         if delta * fov_x < 0 and abs(delta) > movement_epsilon:
                             raise RuntimeError("云台反馈移动方向不符，已停止跟随")
-                        if abs(delta) > movement_epsilon:
+                        if abs(delta) > movement_epsilon and (target_x is None or abs(after["x"] - target_x) <= tolerance):
                             origin["last"] = after
-                            origin["gain_at_one_x"] = abs(delta / fov_x) * zoom_factor
+                            if target_x is None:
+                                origin["gain_at_one_x"] = abs(delta / fov_x) * zoom_factor
                             self._save_follow_origin()
                             return {"settled": True, "fov_x": fov_x, "before": before, "after": after,
                                     "limited": clamped or abs(after["x"] - origin["position"]["x"]) >= travel}

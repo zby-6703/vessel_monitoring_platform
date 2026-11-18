@@ -776,6 +776,7 @@ class OpticalCycleMixin(OpticalFollowingMixin, OpticalPatrolMixin):
             self._closed_cycle_pending = False
             self._pan_limited = False
             self._last_pan_adjust = None
+            self._pan_steps = 0
             self._prezoom_alignments = 0
             self._initialize_patrol()
             self._patrol_first_box = self._source_target_box(candidate, image.shape[1], image.shape[0])

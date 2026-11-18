@@ -27,7 +27,9 @@ class RecordingSettings(BaseModel):
     pan_max_right_travel_ratio: float = Field(default=.15, ge=0, le=.4)
     zoom_view_limits_enabled: bool = True
     pan_dead_zone: float = Field(default=.15, ge=.05, le=.35)
-    pan_step_limit: float = Field(default=.3, ge=.05, le=.6)
+    # FOV x=1 is half of the current image width.
+    pan_step_limit: float = Field(default=1.6, ge=.05, le=2.)
+    pan_max_steps: int = Field(default=2, ge=1, le=20)
     pan_cooldown_seconds: float = Field(default=2, ge=.5, le=15)
     pan_max_travel_ratio: float = Field(default=.15, ge=.01, le=.4)
     zoom_settle_timeout_seconds: float = Field(default=15, ge=3, le=60)
